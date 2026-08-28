@@ -1,0 +1,26 @@
+# Build output
+build/
+
+# MSVC intermediates
+*.obj
+*.o
+*.lib
+*.exp
+*.idb
+*.pdb
+*.ilk
+*.pch
+*.res
+*.map
+*.lnk
+
+# Test logs and crash dumps
+trace*.log
+*.mdmp
+crash.log
+*.txt.log
+
+# IDE / OS
+.vs/
+*.user
+Thumbs.db
