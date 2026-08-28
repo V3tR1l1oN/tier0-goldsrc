@@ -148,6 +148,11 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
    хэндл кучи CRT (`_get_heap_handle`), а не наугад из process-heap.
 5. **Бенчмарк** (`tests/bench.cpp`): объективный замер хот-путей до/после
    правок.
+6. **`Realloc(p, 0)`** (`mem.cpp`): по оригиналу память **не освобождается** —
+   выделяется блок в 1 байт (дисассем оригинального пула: `mov ebx,1;
+   cmovne ebx,edx`). Раньше `realloc(p,0)` делал free и возвращал NULL, что
+   давало use-after-free в движке; поведение покрыто регрессионным тестом
+   `tests/test_mem.cpp`.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 

@@ -6,6 +6,7 @@
 | Файл | Что проверяет |
 |---|---|
 | `test_vprof.cpp` | Основной регрессионный тест: `Start` → `EnterScope/ExitScope` (дерево `Root_Frame → Update/Physics + Render`), повторное использование узлов между кадрами, `GetNumBudgetGroups`, `MarkFrame`, `Stop` |
+| `test_mem.cpp` | Корректность аллокатора по оригиналу: `Alloc(0)` не-NULL и пишется, округление малых размеров, `Realloc(NULL,n)`==`Alloc(n)`, `Realloc(p,0)` **не free** (блок остаётся живым), префикс при сжатии, `Free(NULL)`, `GetVersion()==0`, `IsDebugHeap()==false` |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime` (ns/call), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048; проверка `GetSize` (реальный размер ≥ заказанного) |
 | `diag2.cpp` | Пошаговый полный поток `EnterScope` с логом в `trace*.log` (использовался при разработке) |
 | `diag3.cpp` | SEH-инструментированный прогон тех же вызовов (использовался для отладки краша построения дерева) |
@@ -16,6 +17,7 @@
 
 ```
 cl /O1 /GS- /nologo tests\test_vprof.cpp /Fetests\test_vprof.exe /link /SUBSYSTEM:CONSOLE user32.lib
+cl /O1 /GS- /nologo tests\test_mem.cpp /Fetests\test_mem.exe /link /SUBSYSTEM:CONSOLE
 ```
 
 Тест грузит `tier0.dll` через `LoadLibrary`, поэтому запускать его нужно,

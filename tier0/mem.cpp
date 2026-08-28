@@ -136,12 +136,16 @@ void* CStdMemAlloc::Realloc_Debug( void* pMem, size_t nSize, const char* pFileNa
 
 void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 {
+	// CRITICAL: Original tier0.dll does NOT free memory when newSize == 0!
+	// Instead it allocates a new 1-byte block (see disasm at 0x100044EC: mov ebx,1; cmovne ebx,edx).
+	// realloc(p, 0) would FREE the block and return NULL, which caused
+	// use-after-free crashes in the past -- so normalize 0 -> 1 first,
+	// exactly like Alloc() does.
+	if ( nSize == 0 )
+		nSize = 1;
+
 	if ( !pMem )
 		return Alloc( nSize );
-
-	// CRITICAL: Original tier0.dll does NOT free memory when newSize == 0!
-	// Instead it allocates a new 1-byte block (see disasm at 0x100044EC: mov ebx,1; cmovne ebx,edx)
-	// Our old behavior (free + return NULL) caused use-after-free crashes!
 
 	// Same rounding as Alloc for small blocks
 	size_t nRounded = nSize;
