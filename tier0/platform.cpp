@@ -67,7 +67,7 @@ bool Plat_IsInDebugSession()
 
 #ifdef WIN32
 static LARGE_INTEGER g_Frequency = {};
-static int64 g_Freq = 0;
+static double g_Scale = 0.0;
 static LARGE_INTEGER g_PerfCount = {};
 #endif
 
@@ -78,15 +78,24 @@ double Plat_FloatTime()
 
 	if( !g_Frequency.QuadPart )
 	{
-		QueryPerformanceFrequency( &g_Frequency );
-		g_Freq = g_Frequency.QuadPart / 1000;
+		// Measure/set the scale exactly once. Precomputing 1/frequency turns
+		// the per-call path into a multiply instead of an int64->double divide.
+		if( !QueryPerformanceFrequency( &g_Frequency ) || !g_Frequency.QuadPart )
+		{
+			g_Frequency.QuadPart = 1000;
+			g_Scale = 1.0 / 1000.0;		// fallback: 1 count == 1ms
+		}
+		else
+		{
+			g_Scale = 1.0 / ( double ) g_Frequency.QuadPart;
+		}
+
 		QueryPerformanceCounter( &g_PerfCount );
 	}
 
 	QueryPerformanceCounter( &PerformanceCount );
 
-	return ( double ) ( PerformanceCount.QuadPart - g_PerfCount.QuadPart )
-		/ ( double ) g_Frequency.QuadPart;
+	return ( double ) ( PerformanceCount.QuadPart - g_PerfCount.QuadPart ) * g_Scale;
 #else
 	static int secbase = 0;
 

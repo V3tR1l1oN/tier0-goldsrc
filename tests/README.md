@@ -6,6 +6,7 @@
 | Файл | Что проверяет |
 |---|---|
 | `test_vprof.cpp` | Основной регрессионный тест: `Start` → `EnterScope/ExitScope` (дерево `Root_Frame → Update/Physics + Render`), повторное использование узлов между кадрами, `GetNumBudgetGroups`, `MarkFrame`, `Stop` |
+| `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime` (ns/call), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048; проверка `GetSize` (реальный размер ≥ заказанного) |
 | `diag2.cpp` | Пошаговый полный поток `EnterScope` с логом в `trace*.log` (использовался при разработке) |
 | `diag3.cpp` | SEH-инструментированный прогон тех же вызовов (использовался для отладки краша построения дерева) |
 
@@ -41,15 +42,20 @@ exit code 0
 Любое отклонение (краш, кривое дерево, не-3 группы, `calls≠2` у Update на
 втором кадре) — признак регрессии в `tier0/vprof.cpp`.
 
-## Сборка diag2/diag3
+## Сборка diag2/diag3 / bench
 
 ```
 cl /O1 /GS- /nologo tests\diag2.cpp /Fetests\diag2.exe /link /SUBSYSTEM:CONSOLE user32.lib
 cl /O1 /GS- /nologo tests\diag3.cpp /Fetests\diag3.exe /link /SUBSYSTEM:CONSOLE user32.lib
+cl /O1 /GS- /nologo tests\bench.cpp /Fetests\bench.exe /link /SUBSYSTEM:CONSOLE
 ```
 
-Запуск так же с `tier0.dll` рядом; `diag2`/`diag3` пишут отладочные строки в
-`trace.log`/`trace2.log`/`trace3.log` рядом с exe.
+Запуск `diag2`/`diag3`/`bench` так же с `tier0.dll` рядом; `diag2`/`diag3`
+пишут отладочные строки в `trace.log`/`trace2.log`/`trace3.log` рядом с exe.
+`bench` выводит числа в консоль — сравнивайте их между сборками, чтобы
+объективно видеть, стало ли быстрее/стабильнее после правок
+(`Plat_FloatTime` должен быть монотонным, `GetSize >= ExpectRound(size)` во всех
+строках, вся строка `GetSize ... OK` и `Realloc ... OK` — иначе регрессия).
 
 Тесты используют голые `__thiscall`-обёртки (`__declspec(naked)`): они читают
 аргументы со стекa и зовут целевой метод, не полагаясь на заголовки. Ничего не

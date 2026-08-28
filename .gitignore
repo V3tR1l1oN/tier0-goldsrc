@@ -20,6 +20,10 @@ trace*.log
 crash.log
 *.txt.log
 
+# Locally built test executables and copies of the DLL placed next to them
+tests/*.exe
+tests/tier0.dll
+
 # IDE / OS
 .vs/
 *.user

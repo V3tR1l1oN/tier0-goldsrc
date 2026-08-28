@@ -365,9 +365,80 @@ bool CheckGenuineIntel()
 
 uint64 CalculateCPUFreq();
 
+static unsigned int PopCount( unsigned int x )
+{
+	unsigned int c = 0;
+	while ( x )
+	{
+		c += x & 1;
+		x >>= 1;
+	}
+	return c;
+}
+
+// Counts the total logical processors (threads) and physical cores via the
+// modern Windows API (Win7+). Falls back to GetActiveProcessorCount, then to
+// the legacy GetSystemInfo count, so the numbers stay sane on any OS.
+static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
+{
+	nLogical = 0;
+	nPhysical = 0;
+
+	DWORD dwSize = 0;
+	GetLogicalProcessorInformationEx( RelationProcessorCore, nullptr, &dwSize );
+
+	if( dwSize == 0 )
+	{
+		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
+		nPhysical = nLogical;
+		return;
+	}
+
+	SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* pBuf
+		= ( SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* ) malloc( dwSize );
+
+	if( !pBuf )
+	{
+		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
+		nPhysical = nLogical;
+		return;
+	}
+
+	if( GetLogicalProcessorInformationEx( RelationAll, pBuf, &dwSize ) )
+	{
+		SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* p = pBuf;
+		size_t off = 0;
+
+		while( off < dwSize )
+		{
+			switch( p->Relationship )
+			{
+				case RelationProcessorCore:
+					++nPhysical;
+					for( unsigned int k = 0; k < p->Processor.GroupCount; ++k )
+					{
+						nLogical += PopCount( ( unsigned int ) p->Processor.GroupMask[ k ].Mask );
+					}
+					break;
+				default:
+					break;
+			}
+
+			off += p->Size;
+			p = ( SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* )( ( char* ) p + p->Size );
+		}
+	}
+
+	free( pBuf );
+
+	if( nLogical == 0 )
+		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
+	if( nPhysical == 0 )
+		nPhysical = nLogical;
+}
+
 PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 {
-	//TODO: i have no idea if this is correct, this function may need to be redone from scratch. - Solokiller
 	static CPUInformation pi{};
 
 	if( pi.m_Size != sizeof( CPUInformation ) )
@@ -375,38 +446,43 @@ PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 		pi.m_Size = sizeof( CPUInformation );
 
 		pi.m_Speed = CalculateCPUFreq();
-
-		unsigned int unused, EBX;
-
-		if( CheckGenuineIntel() )
-		{
-			if( cpuid( 1, unused, EBX, unused, unused ) )
-				pi.m_nLogicalProcessors = EBX >> 16;
-			else
-				pi.m_nLogicalProcessors = 1;
-		}
-		else
-		{
-			pi.m_nLogicalProcessors = 1;
-		}
-
-		SYSTEM_INFO SystemInfo;
-		memset( &SystemInfo, 0, sizeof( SystemInfo ) );
-		GetSystemInfo( &SystemInfo );
-
-		pi.m_nPhysicalProcessors = SystemInfo.dwNumberOfProcessors / pi.m_nLogicalProcessors;
-
-		if( !pi.m_nLogicalProcessors && !pi.m_nPhysicalProcessors )
-		{
-			pi.m_nLogicalProcessors = pi.m_nPhysicalProcessors = 1;
-		}
-
-		pi.m_bMMX = CheckMMXTechnology();
-		pi.m_bSSE = CheckSSETechnology();
-		pi.m_bSSE2 = CheckSSE2Technology();
-		//TODO: missing the other ones. - Solokiller
-
 		pi.m_szProcessorID = GetProcessorVendorId();
+
+		unsigned int nEax = 0, nEbx = 0, nEcx = 0, nEdx = 0;
+
+		if( cpuid( 1, nEax, nEbx, nEcx, nEdx ) )
+		{
+			pi.m_bFPU   = ( nEdx & ( 1u <<  0 ) ) != 0;
+			pi.m_bRDTSC = ( nEdx & ( 1u <<  4 ) ) != 0;
+			pi.m_bCMOV  = ( nEdx & ( 1u << 15 ) ) != 0;
+			pi.m_bFCMOV = ( nEdx & ( 1u << 16 ) ) != 0;
+			pi.m_bMMX   = ( nEdx & ( 1u << 23 ) ) != 0;
+			pi.m_bSSE   = ( nEdx & ( 1u << 25 ) ) != 0;
+			pi.m_bSSE2  = ( nEdx & ( 1u << 26 ) ) != 0;
+
+			pi.m_bSSE3   = ( nEcx & ( 1u <<  0 ) ) != 0;
+			pi.m_bSSSE3  = ( nEcx & ( 1u <<  9 ) ) != 0;
+			pi.m_bSSE41  = ( nEcx & ( 1u << 19 ) ) != 0;
+			pi.m_bSSE42  = ( nEcx & ( 1u << 20 ) ) != 0;
+
+			// AVX additionally requires OS-level XSAVE support (OSXSAVE = ECX bit 27).
+			pi.m_bAVX = ( nEcx & ( 1u << 28 ) ) != 0 && ( nEcx & ( 1u << 27 ) ) != 0;
+		}
+
+		unsigned int nEax2 = 0, nEbx2 = 0, nEcx2 = 0, nEdx2 = 0;
+
+		if( cpuid( 0x80000001, nEax2, nEbx2, nEcx2, nEdx2 ) )
+		{
+			pi.m_b3DNow = ( nEdx2 & ( 1u << 31 ) ) != 0;
+			pi.m_bSSE4A = ( nEcx2 & ( 1u <<  6 ) ) != 0;
+		}
+
+		DetectProcessorCounts( pi.m_nLogicalProcessors, pi.m_nPhysicalProcessors );
+
+		if( !pi.m_nLogicalProcessors )
+			pi.m_nLogicalProcessors = 1;
+		if( !pi.m_nPhysicalProcessors )
+			pi.m_nPhysicalProcessors = pi.m_nLogicalProcessors;
 	}
 
 	return pi;

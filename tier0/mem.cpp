@@ -222,11 +222,14 @@ size_t CStdMemAlloc::GetSize( void* pMem )
 	if ( !pMem )
 		return 0;
 
-	// Use HeapSize instead of _msize:
-	// _msize calls _fastfail on invalid pointers which cannot be caught by SEH
-	// HeapSize safely returns 0 for pointers not in the process heap
+	// Use HeapSize over the actual CRT heap instead of _msize:
+	// _msize calls _fastfail on invalid pointers which cannot be caught by SEH,
+	// while HeapSize safely returns 0 for pointers that don't belong to the heap.
+	// _get_heap_handle() returns the exact heap the modern UCRT allocates from
+	// (typically the process heap), which makes GetSize report the REAL usable
+	// size of CRT blocks -- matching the original tier0 behavior.
 #ifdef WIN32
-	return (size_t)HeapSize( GetProcessHeap(), 0, pMem );
+	return (size_t)HeapSize( (HANDLE)_get_heap_handle(), 0, pMem );
 #else
 	return 0;
 #endif

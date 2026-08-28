@@ -6,9 +6,43 @@
 
 extern "C" PVOID WINAPI AddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler);
 
+static HINSTANCE g_hInst = NULL;
+static char g_szCrashLogPath[MAX_PATH];
+static bool g_bCrashLogInit = false;
+
+// Resolves the crash log path once: <directory-of-tier0.dll>\crash.log.
+// Falls back to a relative "crash.log" if the module path can't be queried,
+// so crash reporting works regardless of where the game is installed.
+static const char *GetCrashLogPath()
+{
+	if ( !g_bCrashLogInit )
+	{
+		g_bCrashLogInit = true;
+
+		DWORD len = GetModuleFileNameA( g_hInst, g_szCrashLogPath, MAX_PATH );
+		if ( len > 0 && len < MAX_PATH )
+		{
+			char *slash = strrchr( g_szCrashLogPath, '\\' );
+			if ( slash )
+				*slash = '\0';
+			int n = _snprintf( g_szCrashLogPath + strlen( g_szCrashLogPath ),
+				MAX_PATH - (int)strlen( g_szCrashLogPath ),
+				"\\crash.log" );
+			if ( n < 0 )
+				strcpy( g_szCrashLogPath, "crash.log" );
+		}
+		else
+		{
+			strcpy( g_szCrashLogPath, "crash.log" );
+		}
+	}
+
+	return g_szCrashLogPath;
+}
+
 static void WriteLog(const char *text, int len)
 {
-    HANDLE hFile = CreateFileA("D:\\SteamLibrary\\steamapps\\common\\Half-Life\\crash.log",
+    HANDLE hFile = CreateFileA(GetCrashLogPath(),
         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE)
     {
@@ -93,7 +127,7 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
 {
     if ( pExceptionInfo->ExceptionRecord->ExceptionCode == 0xC0000005 )
     {
-        HANDLE hFile = CreateFileA("D:\\SteamLibrary\\steamapps\\common\\Half-Life\\crash.log",
+        HANDLE hFile = CreateFileA(GetCrashLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
         {
@@ -127,7 +161,7 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
                     (er->NumberParameters > 0) ? (DWORD)er->ExceptionInformation[0] : 0,
                     (er->NumberParameters > 1) ? (DWORD)er->ExceptionInformation[1] : 0);
                 WriteLog(rbuf, rlen);
-                hFile = CreateFileA("D:\\SteamLibrary\\steamapps\\common\\Half-Life\\crash.log",
+                hFile = CreateFileA(GetCrashLogPath(),
                     FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
                 if (hFile != INVALID_HANDLE_VALUE)
                 {
@@ -175,6 +209,8 @@ extern "C" BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvR
 
 	if ( fdwReason == DLL_PROCESS_ATTACH )
 	{
+		g_hInst = hinstDLL;
+
 		DisableThreadLibraryCalls( hinstDLL );
 
 		// Pin DLL in memory (chromehtml.dll may FreeLibrary us)
