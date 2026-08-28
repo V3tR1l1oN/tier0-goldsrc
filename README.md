@@ -53,6 +53,7 @@ tier0/
 │   ├── minidump.cpp     Создание .mdmp при крашах
 │   ├── ...              Остальные модули (validator, valobject, shims...)
 │   └── fdumped_asm_exact.asm  Ассемблерный фрагмент, дословно воспроизведённый по оригиналу
+├── tests/              Функциональные проверки DLL (vprof-харнесс, см. tests/README.md)
 └── public/tier0/        Публичные заголовки (dbg.h, threadtools.h, vprof.h, ...)
 ```
 
