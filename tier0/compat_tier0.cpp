@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: CTier0 global-registry holder + fDumped globals used by the
 //			shipped binary's budget-group dump logic.

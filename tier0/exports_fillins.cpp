@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: Remaining tier0 exports restored from the shipped binary:
 //			platform helpers, scratch memory, PME toggles, test harness

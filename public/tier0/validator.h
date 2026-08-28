@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: Memory validator (DBGFLAG_VALIDATE support).
 //			Class layout mirrors the released tier0.dll

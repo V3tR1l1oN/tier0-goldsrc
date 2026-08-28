@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: Test-thread harness + spew validation helpers restored from
 //			the shipped tier0.dll.

@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: Native emission of the 8 function-local fDumped static variables.
 //

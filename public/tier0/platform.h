@@ -1,4 +1,4 @@
-// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (MIT).
+// tier0 -- clean-room functional reconstruction of GoldSrc tier0.dll (GPL-3.0).
 //
 // Purpose: Common platform definitions for the tier0 rebuild.
 //			Reconstructed to match the original GoldSrc tier0.dll binary layout.
