@@ -6,7 +6,11 @@
 | Файл | Что проверяет |
 |---|---|
 | `test_vprof.cpp` | Основной регрессионный тест: `Start` → `EnterScope/ExitScope` (дерево `Root_Frame → Update/Physics + Render`), повторное использование узлов между кадрами, `GetNumBudgetGroups`, `MarkFrame`, `Stop`. Чистый выход (раньше на teardown падал: double-free в `CVProfile::Term` — исправлено) |
-| `test_mem.cpp` | Корректность аллокатора по оригиналу: `Alloc(0)` не-NULL и пишется, округление малых размеров, `Realloc(NULL,n)`==`Alloc(n)`, `Realloc(p,0)` **не free** (блок остаётся живым), префикс при сжатии, `Free(NULL)`, `GetVersion()==0`, `IsDebugHeap()==false` |
+| `test_mem.cpp` | Корректность аллокатора по оригиналу: `Alloc(0)` не-NULL и пишется, округление малых размеров, `Realloc(NULL,n)`==`Alloc(n)`, `Realloc(p,0)` **не free** (блок остаётся живым), префикс при сжатии, `Free(NULL)`, `GetVersion()==0`, `IsDebugHeap()==false`; плюс покрытие SBA: `GetSize` == точному округлению (весь 1..96 + сэмпл 97..2048, `Alloc(0)==4`), кросс-бакетовые `Realloc` 96↔97 (GetSize 96↔104) и 2048↔2049 (переход SBA↔CRT) с сохранением префикса, чурн 4096 блоков × 50 раундов |
+| `sba_diag.cpp` | Диагностика SBA под нагрузкой: `sba_diag.exe iters size size2` — фазы alloc/check/free, проверка round/GetSize каждого блока, верфи анализ (`live GetSize`), общая маркировка `--- sba_diag done ---` |
+| `test_sba_stress.cpp` | Многопоточный стресс аллокатора: N потоков чурнят смешанные размеры (4..65536, включая CRT-крупные), мгновенная проверка содержимого под контенцией; `test_sba_stress.exe 16 600` ≈ 5 млн alloc/free, ожидается `--- sba stress ok ---` |
+| `test_crash.cpp` | Проверка краш-лога: `test_crash.exe heap` → должна писаться запись `Reason=HEAP_CORRUPTION`, `test_crash.exe brk` → `Reason=BREAKPOINT`; процесс падает с соответствующим EXCEPTION-кодом |
+| `probe_malloc.cpp` | Контроль скорости «голому» CRT-аллокатору (80k×4096 alloc+write+free ≈ 92–97 ms) — бенчмарк, доказывающий, что узкое место было не в CRT-куче |
 | `test_exports.cpp` | Сверка экспортного манифеста: 313/313 имён из `tier0.def`, ординалы строго 1..313, каждый экспорт резолвится `GetProcAddress` и по имени, и по ординалу в один и тот же адрес; вызов безопасного подмножества (`Plat_FloatTime`, `Plat_MSTime`) |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime` (ns/call), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048; проверка `GetSize` (реальный размер ≥ заказанного) |
 | `diag2.cpp` | Пошаговый полный поток `EnterScope` с логом в `trace*.log` (использовался при разработке) |
@@ -20,7 +24,13 @@
 cl /O1 /GS- /nologo tests\test_vprof.cpp /Fetests\test_vprof.exe /link /SUBSYSTEM:CONSOLE user32.lib
 cl /O1 /GS- /nologo tests\test_mem.cpp /Fetests\test_mem.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\test_exports.cpp /Fetests\test_exports.exe /link /SUBSYSTEM:CONSOLE
+cl /O1 /GS- /nologo tests\sba_diag.cpp /Fetests\sba_diag.exe /link /SUBSYSTEM:CONSOLE
+cl /O2 /GS- /nologo tests\test_sba_stress.cpp /Fetests\test_sba_stress.exe /link /SUBSYSTEM:CONSOLE
+cl /O1 /GS- /nologo tests\test_crash.cpp /Fetests\test_crash.exe /link /SUBSYSTEM:CONSOLE
 ```
+
+Для удобства есть скрипты `build_bench.bat`, `build_sba_diag.bat`,
+`build_sba_stress.bat` (сами зовут `vcvars32.bat`).
 
 Тест грузит `tier0.dll` через `LoadLibrary`, поэтому запускать его нужно,
 **положив `build\tier0.dll` рядом с exe** (или в текущую директорию):
@@ -58,6 +68,28 @@ export manifest: 313 total (1 DATA), ordinals 1..313
 Вся строка `export manifest: 313 total ...` плюс `--- all ok ---` — признак того,
 что ни один экспорт не потерялся, имя каждого экспорта резолвится в тот же
 адрес, что и его ординал, и безопасное подмножество функций реально вызывается.
+
+## Ожидаемые результаты SBA-тестов
+
+```
+tests\sba_diag.exe 200000 4 2048
+---
+refill 200000 (t=491ms)          <- тысячи аллокаций 4->2048 за полсекунды
+--- sba_diag done (t=600ms) ---
+exit code 0
+
+tests\test_sba_stress.exe 16 600
+--- sba stress ok (16 threads x 600 rounds x 512 blocks) ---
+exit code 0
+```
+
+Любой не-нулевой exit, краш, `live GetSize`≠`0xFFFFFFFF` или расхождение
+содержимого в стресс-тесте — признак регрессии в `tier0/mem.cpp`
+(ресайклинг/хэш-карта слабов).
+
+`test_crash.exe` пишет в `crash.log` рядом с DLL:
+`Reason=HEAP_CORRUPTION` / `Reason=BREAKPOINT` с дампом регистров и стека.
+Запускать по одному процессу на режим (процесс завершается по exeption-коду).
 
 ## Сборка diag2/diag3 / bench
 
