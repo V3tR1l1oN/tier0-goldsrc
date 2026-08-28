@@ -5,7 +5,7 @@
 
 | Файл | Что проверяет |
 |---|---|
-| `test_vprof.cpp` | Основной регрессионный тест: `Start` → `EnterScope/ExitScope` (дерево `Root_Frame → Update/Physics + Render`), повторное использование узлов между кадрами, `GetNumBudgetGroups`, `MarkFrame`, `Stop` |
+| `test_vprof.cpp` | Основной регрессионный тест: `Start` → `EnterScope/ExitScope` (дерево `Root_Frame → Update/Physics + Render`), повторное использование узлов между кадрами, `GetNumBudgetGroups`, `MarkFrame`, `Stop`. Чистый выход (раньше на teardown падал: double-free в `CVProfile::Term` — исправлено) |
 | `test_mem.cpp` | Корректность аллокатора по оригиналу: `Alloc(0)` не-NULL и пишется, округление малых размеров, `Realloc(NULL,n)`==`Alloc(n)`, `Realloc(p,0)` **не free** (блок остаётся живым), префикс при сжатии, `Free(NULL)`, `GetVersion()==0`, `IsDebugHeap()==false` |
 | `test_exports.cpp` | Сверка экспортного манифеста: 313/313 имён из `tier0.def`, ординалы строго 1..313, каждый экспорт резолвится `GetProcAddress` и по имени, и по ординалу в один и тот же адрес; вызов безопасного подмножества (`Plat_FloatTime`, `Plat_MSTime`) |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime` (ns/call), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048; проверка `GetSize` (реальный размер ≥ заказанного) |

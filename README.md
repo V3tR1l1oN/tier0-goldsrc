@@ -175,6 +175,14 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
    cmovne ebx,edx`). Раньше `realloc(p,0)` делал free и возвращал NULL, что
    давало use-after-free в движке; поведение покрыто регрессионным тестом
    `tests/test_mem.cpp`.
+7. **`CVProfile::Term`** (`vprof.cpp`): убран двойной `delete` дерева узлов
+   при выгрузке DLL (двойное освобождение памяти) — `tests\test_vprof.exe`
+   раньше падал на teardown с access violation, теперь завершается чисто.
+8. **Краш-лог до конца** (`tier0.cpp`): добиты два оставшихся хардкод-участка
+   `D:\SteamLibrary\...` (маркеры секций стека) — весь журнал падений без
+   исключений пишется рядом с DLL.
+9. **Экспорт-харнесс** (`tests/test_exports.cpp`): автосверка всех 313
+   экспортов «имя ↔ ординал ↔ адрес» через `GetProcAddress`.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 

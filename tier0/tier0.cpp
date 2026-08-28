@@ -170,7 +170,7 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
                     CloseHandle(hFile);
                 }
             }
-            hFile = CreateFileA("D:\\SteamLibrary\\steamapps\\common\\Half-Life\\crash.log",
+            hFile = CreateFileA(GetCrashLogPath(),
                 FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hFile != INVALID_HANDLE_VALUE) {
                 DWORD w2;
@@ -191,7 +191,7 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
 
             LogStackSweep(pExceptionInfo->ContextRecord->Esp);
 
-            hFile = CreateFileA("D:\\SteamLibrary\\steamapps\\common\\Half-Life\\crash.log",
+            hFile = CreateFileA(GetCrashLogPath(),
                 FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hFile != INVALID_HANDLE_VALUE) {
                 DWORD w3;

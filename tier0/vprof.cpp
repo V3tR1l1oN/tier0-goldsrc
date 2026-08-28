@@ -437,16 +437,11 @@ CVProfile& CVProfile::operator=( const CVProfile& other )
 
 void CVProfile::Term()
 {
-	FreeNodes_R( m_Root.GetChild() );
-
-	CVProfNode *pNextChild = m_Root.GetChild();
-	while ( pNextChild )
+	if ( m_Root.GetChild() )
 	{
-		CVProfNode *pNext = pNextChild->GetSibling();
-		delete pNextChild;
-		pNextChild = pNext;
+		FreeNodes_R( m_Root.GetChild() );
+		m_Root.m_pChild = NULL;
 	}
-	m_Root.m_pSibling = NULL;
 
 	m_pRoot = &m_Root;
 	m_fAtRoot = true;
