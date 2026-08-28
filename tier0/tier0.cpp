@@ -125,20 +125,30 @@ static void LogStackSweep(DWORD esp)
 
 static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
 {
-    if ( pExceptionInfo->ExceptionRecord->ExceptionCode == 0xC0000005 )
+    DWORD code = pExceptionInfo->ExceptionRecord->ExceptionCode;
+    const char *reason = NULL;
+    if ( code == 0xC0000005 )
+        reason = "ACCESS_VIOLATION";
+    else if ( code == 0xC0000374 )
+        reason = "HEAP_CORRUPTION";
+    else if ( code == 0x80000003 )
+        reason = "BREAKPOINT";
+
+    if ( reason )
     {
         HANDLE hFile = CreateFileA(GetCrashLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
         {
             char buf[1024];
-            DWORD code = pExceptionInfo->ExceptionRecord->ExceptionCode;
             void *excAddr = pExceptionInfo->ExceptionRecord->ExceptionAddress;
-            void *targetAddr = (void*)pExceptionInfo->ExceptionRecord->ExceptionInformation[1];
-            DWORD op = (DWORD)pExceptionInfo->ExceptionRecord->ExceptionInformation[0];
+            void *targetAddr = NULL;
+            DWORD numPar = pExceptionInfo->ExceptionRecord->NumberParameters;
+            if ( numPar > 1 )
+                targetAddr = (void *)pExceptionInfo->ExceptionRecord->ExceptionInformation[1];
 
             int len = _snprintf(buf, sizeof(buf) - 1,
-                "=== CRASH ===\r\nCode=0x%08X Op=%d Target=%p\r\nEIP:\r\n", code, op, targetAddr);
+                "=== CRASH ===\r\nReason=%s Code=0x%08X Target=%p\r\nEIP:\r\n", reason, code, targetAddr);
             DWORD written;
             WriteFile(hFile, buf, len, &written, NULL);
             CloseHandle(hFile);

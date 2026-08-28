@@ -112,6 +112,7 @@ static void BenchRealloc(IMemAllocB *pAlloc, unsigned int iters)
 
 int main()
 {
+	setvbuf(stdout, NULL, _IONBF, 0);
 	HMODULE h = LoadLibraryA("tier0.dll");
 	if (!h)
 	{
@@ -136,10 +137,16 @@ int main()
 	printf("\n");
 
 	size_t sizes[] = { 4, 64, 256, 1024, 2048, 8192, 65536 };
+	unsigned int phaseIters[] = { 200000, 200000, 200000, 50000, 20000, 2000, 128 };
 	for (int i = 0; i < 7; ++i)
-		BenchAllocFree(pAlloc, sizes[i], 200000);
+	{
+		printf("-- phase %d/7 size %u\n", i + 1, (unsigned int)sizes[i]);
+		BenchAllocFree(pAlloc, sizes[i], phaseIters[i]);
+	}
 
-	BenchRealloc(pAlloc, 200000);
+	printf("-- phase realloc 64->2048\n");
+
+	BenchRealloc(pAlloc, 50000);
 
 	printf("--- bench done ---\n");
 	return 0;

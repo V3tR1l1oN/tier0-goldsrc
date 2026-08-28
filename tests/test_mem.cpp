@@ -171,6 +171,167 @@ int main()
 	CHECK(p->IsDebugHeap() == false, "IsDebugHeap() != false");
 	p->CompactHeap();
 
+	// 7) GetSize equals the exact SBA round for every 1..96 and sampled 97..2048
+	{
+		for (size_t n = 1; n <= 96; ++n)
+		{
+			void *q = p->Alloc(n);
+			if (!q) { printf("FAIL: Alloc(%u)\n", (unsigned)n); g_fails++; break; }
+			size_t exp = (n + 3) & ~(size_t)3;
+			size_t got = p->GetSize(q);
+			if (got != exp)
+			{
+				printf("FAIL: GetSize(%u)=%u != %u\n", (unsigned)n, (unsigned)got, (unsigned)exp);
+				g_fails++;
+			}
+			p->Free(q, 0);
+		}
+		for (size_t n = 97; n <= 2048; n += 29)
+		{
+			void *q = p->Alloc(n);
+			if (!q) { printf("FAIL: Alloc(%u)\n", (unsigned)n); g_fails++; break; }
+			size_t exp = (n + 7) & ~(size_t)7;
+			size_t got = p->GetSize(q);
+			if (got != exp)
+			{
+				printf("FAIL: GetSize(%u)=%u != %u\n", (unsigned)n, (unsigned)got, (unsigned)exp);
+				g_fails++;
+			}
+			p->Free(q, 0);
+		}
+		// Alloc(0) normalizes to 1 -> bucket payload 4
+		{
+			void *z = p->Alloc(0);
+			CHECK(z && p->GetSize(z) == 4, "GetSize(Alloc(0)) != 4");
+			if (z) p->Free(z, 0);
+		}
+	}
+
+	// 8) Cross-bucket Realloc 96 <-> 97 preserves the prefix and changes GetSize
+	{
+		unsigned char *q1 = (unsigned char *)p->Alloc(96);
+		CHECK(q1 != NULL, "setup Alloc(96) failed");
+		if (q1)
+		{
+			CHECK(p->GetSize(q1) == 96, "GetSize(Alloc(96)) != 96");
+			memset(q1, 0xC1, 96);
+			unsigned char *r1 = (unsigned char *)p->Realloc(q1, 97);
+			CHECK(r1 != NULL, "Realloc(96->97) == NULL");
+			if (r1)
+			{
+				CHECK(p->GetSize(r1) == 104, "GetSize(96->97) != 104");
+				int ok = 1;
+				for (int i = 0; i < 96; ++i)
+					if (r1[i] != 0xC1) { ok = 0; break; }
+				CHECK(ok, "realloc 96->97 lost prefix");
+				p->Free(r1, 0);
+			}
+		}
+
+		unsigned char *q2 = (unsigned char *)p->Alloc(97);
+		CHECK(q2 != NULL, "setup Alloc(97) failed");
+		if (q2)
+		{
+			CHECK(p->GetSize(q2) == 104, "GetSize(Alloc(97)) != 104");
+			memset(q2, 0xC2, 97);
+			unsigned char *r2 = (unsigned char *)p->Realloc(q2, 96);
+			CHECK(r2 != NULL, "Realloc(97->96) == NULL");
+			if (r2)
+			{
+				CHECK(p->GetSize(r2) == 96, "GetSize(97->96) != 96");
+				int ok = 1;
+				for (int i = 0; i < 96; ++i)
+					if (r2[i] != 0xC2) { ok = 0; break; }
+				CHECK(ok, "realloc 97->96 lost prefix");
+				p->Free(r2, 0);
+			}
+		}
+	}
+
+	// 9) Boundary Realloc 2048 (SBA max pool) <-> 2049 (CRT heap)
+	{
+		unsigned char *q1 = (unsigned char *)p->Alloc(2048);
+		CHECK(q1 != NULL, "setup Alloc(2048) failed");
+		if (q1)
+		{
+			memset(q1, 0xD1, 2048);
+			unsigned char *r1 = (unsigned char *)p->Realloc(q1, 2049);
+			CHECK(r1 != NULL, "Realloc(2048->2049) == NULL");
+			if (r1)
+			{
+				CHECK(p->GetSize(r1) >= 2049, "GetSize(2048->2049) < 2049");
+				int ok = 1;
+				for (int i = 0; i < 2048; ++i)
+					if (r1[i] != 0xD1) { ok = 0; break; }
+				CHECK(ok, "realloc 2048->2049 lost prefix");
+				p->Free(r1, 0);
+			}
+		}
+
+		unsigned char *q2 = (unsigned char *)p->Alloc(2049);
+		CHECK(q2 != NULL, "setup Alloc(2049) failed");
+		if (q2)
+		{
+			CHECK(p->GetSize(q2) >= 2049, "GetSize(Alloc(2049)) < 2049");
+			memset(q2, 0xD2, 2049);
+			unsigned char *r2 = (unsigned char *)p->Realloc(q2, 2048);
+			CHECK(r2 != NULL, "Realloc(2049->2048) == NULL");
+			if (r2)
+			{
+				CHECK(p->GetSize(r2) == 2048, "GetSize(2049->2048) != 2048");
+				int ok = 1;
+				for (int i = 0; i < 2048; ++i)
+					if (r2[i] != 0xD2) { ok = 0; break; }
+				CHECK(ok, "realloc 2049->2048 lost prefix");
+				p->Free(r2, 0);
+			}
+		}
+	}
+
+	// 10) Mixed-size churn: alloc/free cycles exercise carving, recycling and
+	//     the slab-destroy path; contents must survive across rounds untouched.
+	{
+		enum { N = 4096, ROUNDS = 50 };
+		static const size_t mix[] = { 4, 5, 16, 17, 96, 97, 512, 2048, 2049 };
+		unsigned char *blocks[N];
+		size_t caps[N];
+
+		for (int round = 0; round < ROUNDS; ++round)
+		{
+			for (int i = 0; i < N; ++i)
+			{
+				size_t sz = mix[i % 9];
+				blocks[i] = (unsigned char *)p->Alloc(sz);
+				CHECK(blocks[i] != NULL, "churn Alloc == NULL");
+				if (blocks[i])
+				{
+					caps[i] = (sz <= 2048) ? ExpectedRound(sz) : sz;
+					for (size_t k = 0; k < caps[i]; ++k)
+						blocks[i][k] = (unsigned char)(i + (int)k);
+				}
+			}
+			if (round % 10 == 9)
+			{
+				for (int i = 0; i < N; ++i)
+				{
+					if (blocks[i])
+					{
+						int ok = 1;
+						for (size_t k = 0; k < caps[i]; ++k)
+							if (blocks[i][k] != (unsigned char)(i + (int)k)) { ok = 0; break; }
+						if (!ok)
+						{
+							printf("FAIL: churn contents at round %d, block %d\n", round, i);
+							g_fails++;
+						}
+					}
+				}
+			}
+			for (int i = N - 1; i >= 0; --i)
+				if (blocks[i]) p->Free(blocks[i], 0);
+		}
+	}
+
 	printf(g_fails ? "--- %d FAILURES ---\n" : "--- all ok ---\n", g_fails);
 	return g_fails ? 1 : 0;
 }
