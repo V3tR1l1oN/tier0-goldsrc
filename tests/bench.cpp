@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <process.h>
 
 // Minimal mirror of IMemAlloc: vtable layout must match
 // public/tier0/memalloc.h (declaration order from slot 0).
@@ -27,6 +28,9 @@ public:
 };
 
 typedef double (__cdecl *Plat_FloatTimeFn)();
+typedef unsigned int (__cdecl *Plat_MSTimeFn)();
+typedef unsigned (__stdcall *SimpleWorkerFn)(void *);
+typedef void *(__cdecl *CreateSimpleThreadFn)(SimpleWorkerFn, void *, unsigned *, unsigned);
 
 static double NowSec()
 {
@@ -110,6 +114,83 @@ static void BenchRealloc(IMemAllocB *pAlloc, unsigned int iters)
 		dt * 1e9 / iters, (unsigned int)liveSize, liveSize >= 2048 ? "OK" : "MISMATCH");
 }
 
+static unsigned __stdcall NoopWorker(void *) { return 0; }
+
+static void BenchThreadCreateJoin(CreateSimpleThreadFn fn, unsigned int iters)
+{
+	// warm one spawn (heap + OS thread setup)
+	void *h = fn(NoopWorker, NULL, NULL, 0);
+	if (h)
+	{
+		WaitForSingleObject((HANDLE)h, INFINITE);
+		CloseHandle((HANDLE)h);
+	}
+
+	double t0 = NowSec();
+	for (unsigned int i = 0; i < iters; ++i)
+	{
+		h = fn(NoopWorker, NULL, NULL, 0);
+		WaitForSingleObject((HANDLE)h, INFINITE);
+		CloseHandle((HANDLE)h);
+	}
+	double dt = NowSec() - t0;
+	printf("Thread create+join    : %8.2f us/spawn (%u spawns)\n",
+		dt * 1e6 / iters, iters);
+}
+
+// Producers allocate blocks of one size on their own threads; the main thread
+// frees them all. Freeing on a different thread than allocation walks the
+// calling thread's TLS caches and spills to the global pool past the cap --
+// this is the engine's "many worker threads allocate, main thread frees" shape.
+struct CrossChurnShared
+{
+	IMemAllocB *p;
+	void **ptrs;
+	volatile long head;   // next free slot (locked increment)
+	unsigned int perThread;
+};
+
+static unsigned __stdcall CrossProducer(void *pv)
+{
+	CrossChurnShared *c = (CrossChurnShared *)pv;
+	for (unsigned int i = 0; i < c->perThread; ++i)
+	{
+		long idx = InterlockedIncrement(&c->head) - 1;
+		c->ptrs[idx] = c->p->Alloc(256);
+	}
+	return 0;
+}
+
+static void BenchCrossThreadChurn(IMemAllocB *pAlloc, CreateSimpleThreadFn fnThread,
+	unsigned int threads, unsigned int perThread, size_t size)
+{
+	unsigned int total = threads * perThread;
+	CrossChurnShared c;
+	c.p = pAlloc;
+	c.ptrs = new void *[total];
+	c.head = 0;
+	c.perThread = perThread;
+
+	void **threadsH = new void *[threads];
+	double t0 = NowSec();
+	for (unsigned int t = 0; t < threads; ++t)
+		threadsH[t] = fnThread(CrossProducer, &c, NULL, 0);
+	for (unsigned int t = 0; t < threads; ++t)
+	{
+		WaitForSingleObject((HANDLE)threadsH[t], INFINITE);
+		CloseHandle((HANDLE)threadsH[t]);
+	}
+	double tMid = NowSec();
+	for (unsigned int i = 0; i < total; ++i)
+		pAlloc->Free(c.ptrs[i], 0);
+	double tEnd = NowSec();
+
+	printf("XThread alloc %-6u   : %8.2f ns/alloc (%u threads), free-main %8.2f ns/op\n",
+		(unsigned int)size, (tMid - t0) * 1e9 / total, threads, (tEnd - tMid) * 1e9 / total);
+	delete[] c.ptrs;
+	delete[] threadsH;
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -121,11 +202,13 @@ int main()
 	}
 
 	Plat_FloatTimeFn pfnFloatTime = (Plat_FloatTimeFn)GetProcAddress(h, "Plat_FloatTime");
+	Plat_MSTimeFn pfnMSTime = (Plat_MSTimeFn)GetProcAddress(h, "Plat_MSTime");
+	CreateSimpleThreadFn pfnThread = (CreateSimpleThreadFn)GetProcAddress(h, "CreateSimpleThread");
 	size_t *pGpa = (size_t *)GetProcAddress(h, "g_pMemAlloc");
 	IMemAllocB **ppAlloc = (IMemAllocB **)pGpa;
 	IMemAllocB *pAlloc = ppAlloc ? *ppAlloc : NULL;
 
-	if (!pfnFloatTime || !pAlloc)
+	if (!pfnFloatTime || !pfnMSTime || !pfnThread || !pAlloc)
 	{
 		printf("FAIL: missing exports (Plat_FloatTime=@244, g_pMemAlloc=@311)\n");
 		return 1;
@@ -136,6 +219,25 @@ int main()
 	(void)ns;
 	printf("\n");
 
+	// Plat_MSTime cost
+	{
+		unsigned int warm = pfnMSTime();
+		double t0 = NowSec();
+		unsigned int prev = warm;
+		int monotonic = 1;
+		for (unsigned int i = 0; i < 3000000; ++i)
+		{
+			unsigned int v = pfnMSTime();
+			if (v < prev)
+				monotonic = 0;
+			prev = v;
+		}
+		double dt = NowSec() - t0;
+		printf("Plat_MSTime           : %8.2f ns/call (%s)\n",
+			dt * 1e9 / 3000000, monotonic ? "monotonic" : "warning: wrapped");
+		printf("\n");
+	}
+
 	size_t sizes[] = { 4, 64, 256, 1024, 2048, 8192, 65536 };
 	unsigned int phaseIters[] = { 200000, 200000, 200000, 50000, 20000, 2000, 128 };
 	for (int i = 0; i < 7; ++i)
@@ -145,8 +247,14 @@ int main()
 	}
 
 	printf("-- phase realloc 64->2048\n");
-
 	BenchRealloc(pAlloc, 50000);
+
+	printf("\n");
+	printf("-- thread create/join\n");
+	BenchThreadCreateJoin(pfnThread, 200);
+
+	printf("-- cross-thread churn (alloc 4thr -> free main)\n");
+	BenchCrossThreadChurn(pAlloc, pfnThread, 4, 50000, 256);
 
 	printf("--- bench done ---\n");
 	return 0;

@@ -324,11 +324,14 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 
 ```
 Plat_FloatTime         :    36 ns/call (монотонно)
-Alloc/Free 4..65536    :    12 ns ... 1.5 µs на операцию
-Alloc/Free 2048        :   ~74 ns/op (арена с прекешем; холодный старт ~120)
+Plat_MSTime            :    36 ns/call (монотонно)
+Alloc/Free 4..65536    :    12 ns ... 3.2 µs на операцию
+Alloc/Free 2048        :   ~62-74 ns/op (арена с прекешем; холодный старт ~120)
 Churn 2048 (один поток):   ~10 ns/op против ~38 ns/op у raw malloc/free
 GetSize (live)         :   ~4 ns/call таблицей (raw _msize — ~6 ns)
 SBA contention 1/4/16  :   ~32 / ~12 / ~9 ns/op (per-thread 375000; было ~50/120/300)
+XThread alloc/free 256 :   ~30 / ~33 ns/op — 4 потока аллоцируют, главный освобождает
+Thread create+join     :   ~102 µs под спавн (~10 000 потоков/сек)
 SBA stress 16 потоков  :   16×600×512 ≈ 5 млн alloc/free, чисто (exit 0)
 Arena alloc-all 2048   :   120 ns/op vs 1008 ns/op (SBA_ARENA=0); free 3 vs 10 мс
 313 экспортов          :   совпадают с оригиналом (dumpbin)
