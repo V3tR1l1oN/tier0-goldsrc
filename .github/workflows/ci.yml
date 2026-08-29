@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: x86 MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build tier0.dll
+        shell: cmd
+        run: build.bat
+
+      - name: Verify export count (dumpbin /EXPORTS)
+        shell: cmd
+        run: |
+          dumpbin /EXPORTS build\tier0.dll > build\exports.txt
+          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern 'total number of functions exported:\s+313')) { Get-Content build\exports.txt | Select-Object -Last 5; Write-Error 'export count != 313'; exit 1 }"
+
+      - name: Build test harnesses
+        shell: cmd
+        run: tests\build_tests.bat
+
+      - name: Run test suite
+        shell: pwsh
+        run: |
+          Copy-Item build\tier0.dll tests\tier0.dll -Force
+          $procs = @(
+            @{ n = 'test_exports';   e = 0 },
+            @{ n = 'test_mem';       e = 0 },
+            @{ n = 'test_vprof';     e = 0 },
+            @{ n = 'test_getsize2048'; e = 0 },
+            @{ n = 'test_sba_stress'; e = 0 },
+            @{ n = 'test_sba_mt';    e = 0 },
+            @{ n = 'sba_diag';       e = 0 }
+          )
+          # test_crash intentionally crashes (heap corruption assert) -- not run.
+          foreach ($t in $procs) {
+            & "tests\$($t.n).exe" *> $null
+            if ($LASTEXITCODE -ne $t.e) {
+              Write-Error "$($t.n) failed: exit=$LASTEXITCODE expected=$($t.e)"
+            } else {
+              Write-Host "$($t.n): OK"
+            }
+          }
+
+      - name: Run MT stress (long)
+        shell: pwsh
+        run: |
+          & tests\test_sba_mt.exe 6000000 *> $null
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_sba_mt 6M failed: $LASTEXITCODE" }
+          Write-Host "test_sba_mt 6M: OK"
+
+      - name: Run fallback mode suite (SBA_ARENA=0)
+        shell: pwsh
+        run: |
+          $env:SBA_ARENA = '0'
+          & tests\test_sba_mt.exe 2000000 *> $null
+          if ($LASTEXITCODE -ne 0) { Write-Error "fallback test_sba_mt failed: $LASTEXITCODE" }
+          Remove-Item Env:SBA_ARENA
+          Write-Host "fallback (SBA_ARENA=0): OK"
+
+      - name: Benchmark smoke
+        shell: pwsh
+        run: |
+          & tests\bench.exe | Out-File -FilePath bench.out -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { Write-Error "bench failed: $LASTEXITCODE" }
+          Select-String -Path bench.out -Pattern 'bench done' | ForEach-Object { $_.Line }
