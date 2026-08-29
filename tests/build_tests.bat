@@ -25,7 +25,7 @@ if not defined VCToolsInstallDir (
     exit /b 1
 )
 
-set "T=%~dp0tests"
+set "T=%~dp0"
 
 cl /O1 /GS- /nologo "%T%\test_exports.cpp"   /Fe"%T%\test_exports.exe"   /link /SUBSYSTEM:CONSOLE || goto :fail
 cl /O1 /GS- /nologo "%T%\test_mem.cpp"       /Fe"%T%\test_mem.exe"       /link /SUBSYSTEM:CONSOLE || goto :fail

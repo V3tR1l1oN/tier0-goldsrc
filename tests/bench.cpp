@@ -114,6 +114,30 @@ static void BenchRealloc(IMemAllocB *pAlloc, unsigned int iters)
 		dt * 1e9 / iters, (unsigned int)liveSize, liveSize >= 2048 ? "OK" : "MISMATCH");
 }
 
+// GetSize on LIVE large (non-SBA) blocks: these go through HeapSize() which
+// takes the CRT heap lock -- worth measuring so the number is on record.
+static void BenchGetSizeLive(IMemAllocB *pAlloc, size_t size, unsigned int count)
+{
+	void **ptrs = new void *[count];
+	for (unsigned int i = 0; i < count; ++i)
+		ptrs[i] = pAlloc->Alloc(size);
+
+	double t0 = NowSec();
+	size_t acc = 0;
+	for (unsigned int r = 0; r < 30; ++r)
+		for (unsigned int i = 0; i < count; ++i)
+			acc += pAlloc->GetSize(ptrs[i]);
+	double dt = NowSec() - t0;
+
+	size_t ok = (acc == count * 30u * size) ? 1 : 0;   // HeapSize must be exact
+	printf("GetSize live %-6u    : %8.2f ns/call (count %u, %s)\n",
+		(unsigned int)size, dt * 1e9 / (count * 30u), count, ok ? "exact" : "MISMATCH");
+
+	for (unsigned int i = 0; i < count; ++i)
+		pAlloc->Free(ptrs[i], 0);
+	delete[] ptrs;
+}
+
 static unsigned __stdcall NoopWorker(void *) { return 0; }
 
 static void BenchThreadCreateJoin(CreateSimpleThreadFn fn, unsigned int iters)
@@ -248,6 +272,11 @@ int main()
 
 	printf("-- phase realloc 64->2048\n");
 	BenchRealloc(pAlloc, 50000);
+
+	printf("\n");
+	printf("-- getsize live large blocks\n");
+	BenchGetSizeLive(pAlloc, 8192, 2000);
+	BenchGetSizeLive(pAlloc, 65536, 256);
 
 	printf("\n");
 	printf("-- thread create/join\n");

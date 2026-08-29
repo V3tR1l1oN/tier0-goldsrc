@@ -3,6 +3,11 @@
 // iteration count at which the heap gets corrupted (STATUS_HEAP_CORRUPTION
 // aborts the process, so we run fewer and fewer counts to bisect).
 //
+// Installs a SpewOutputFunc BEFORE calling DumpStats: faithfully, tier0's
+// default spew func returns SPEW_DEBUGGER for Msg() -- and SpewMessageType
+// then executes __debugbreak(). In a real game the engine installs its own
+// output function; a bare harness without one would hit the breakpoint.
+//
 // Build: cl /O1 /GS- /nologo tests\sba_diag.cpp /Fetests\sba_diag.exe /link /SUBSYSTEM:CONSOLE
 
 #include <windows.h>
@@ -20,6 +25,14 @@ static double now_msec(void)
 	QueryPerformanceFrequency(&f);
 	QueryPerformanceCounter(&c);
 	return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+// SPEW_CONTINUE must be 0 (dbg.h: CONTINUE=0, DEBUGGER=1, ABORT=2).
+static int __cdecl OurSpew(int spewType, const char *pszMsg)
+{
+	(void)spewType;
+	fputs(pszMsg, stderr);
+	return 0;
 }
 
 class IMemAllocB
@@ -69,6 +82,11 @@ int main(int argc, char **argv)
 	if (!h) { printf("cannot load tier0.dll\n"); return 2; }
 	size_t *gp = (size_t *)GetProcAddress(h, "g_pMemAlloc");
 	IMemAllocB *p = (IMemAllocB *)(*gp);
+
+	typedef void (__cdecl *SetSpewFn)(int(__cdecl*)(int, const char *));
+	SetSpewFn setSpew = (SetSpewFn)GetProcAddress(h, "SpewOutputFunc");
+	if (setSpew)
+		setSpew(OurSpew);   // avoid faithful Msg() -> __debugbreak()
 
 	printf("--- arena stats before ---\n");
 	p->DumpStats();
