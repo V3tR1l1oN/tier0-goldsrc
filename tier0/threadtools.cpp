@@ -12,6 +12,7 @@
 
 #include <process.h>
 #include <intrin.h>
+#include <stdlib.h>
 
 #ifdef WIN32
 static DWORD g_ThreadMainThreadID = GetCurrentThreadId();
@@ -92,9 +93,92 @@ int64 ThreadInterlockedEmu_ExchangeAdd64( volatile int64 *pDest, int64 value )
 // Thread API
 //=============================================================================
 
+//-----------------------------------------------------------------------------
+// Precise sleep. Bare ::Sleep() on Windows quantizes to the system timer
+// (~15.625 ms), so a 100/128 tick server thread that sleeps 10/7.8 ms actually
+// wakes every ~15.6 ms and its tick rate collapses toward 64 -- the engine's
+// clock lags the simulation and client-side interpolation gets stretchy/jerky.
+// Hybrid: ::Sleep() for the coarse part, then busy-wait the last millisecond
+// against QPC with pause (no extra system timer resolution, no wakeups).
+// Set TIER0_PRECISE_SLEEP=0 to restore legacy coarse behavior.
+//-----------------------------------------------------------------------------
+
+bool BPreciseSleepEnabled()
+{
+	static int s_mode = -1;
+	if ( s_mode < 0 )
+	{
+		const char *psz = getenv( "TIER0_PRECISE_SLEEP" );
+		s_mode = ( psz && psz[ 0 ] == '0' ) ? 0 : 1;
+	}
+	return s_mode != 0;
+}
+
+extern "C" unsigned int __stdcall timeBeginPeriod( unsigned int uPeriod );
+
+static double SlpNow()
+{
+	static LARGE_INTEGER s_Frequency = {};
+	static LARGE_INTEGER s_Base = {};
+	static bool s_bInit = false;
+
+	if ( !s_bInit )
+	{
+		QueryPerformanceFrequency( &s_Frequency );
+		QueryPerformanceCounter( &s_Base );
+		s_bInit = true;
+	}
+
+	LARGE_INTEGER c;
+	QueryPerformanceCounter( &c );
+	return ( double )( c.QuadPart - s_Base.QuadPart ) / ( double )s_Frequency.QuadPart;
+}
+
+void PreciseSleep( unsigned duration )
+{
+	if ( duration == 0 )
+	{
+		::Sleep( 0 );
+		return;
+	}
+
+	if ( !BPreciseSleepEnabled() )
+	{
+		::Sleep( duration );
+		return;
+	}
+
+	// Short waits spin too much CPU for nothing, long waits are dominated by
+	// ::Sleep's own accuracy anyway. For the tick-pacing sweet spot (3..50 ms)
+	// first raise the system timer to 1 ms (once, for process lifetime -- the
+	// standard game practice), then sleep most of the duration and spin the
+	// remaining ~1 ms against QPC.
+	const unsigned kSpinHeadroom = 1;
+	if ( duration < 3 || duration > 50 )
+	{
+		::Sleep( duration );
+		return;
+	}
+
+	static bool s_bHighRes = false;
+	if ( !s_bHighRes )
+		s_bHighRes = ( timeBeginPeriod( 1 ) == 0 );
+
+	const double target = ( double )duration / 1000.0;
+	const double tStart = SlpNow();
+	::Sleep( duration > kSpinHeadroom + 1 ? duration - kSpinHeadroom : 1 );
+
+	for ( ;; )
+	{
+		if ( SlpNow() - tStart >= target )
+			break;
+		_mm_pause();
+	}
+}
+
 void ThreadSleep( unsigned duration )
 {
-	Sleep( duration );
+	PreciseSleep( duration );
 }
 
 uint ThreadGetCurrentId()
@@ -759,8 +843,7 @@ bool CThread::SetPriority( int priority )
 
 void CThread::Sleep( unsigned duration )
 {
-	// ::Sleep required: unqualified name resolves to this member (C4717 otherwise).
-	::Sleep( duration );
+	PreciseSleep( duration );
 }
 
 void (CThread::Yield)()

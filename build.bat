@@ -67,7 +67,7 @@ link /nologo /DLL /DEF:"%~dp0tier0.def" ^
      /MACHINE:X86 /SUBSYSTEM:WINDOWS ^
      /OPT:NOREF /OPT:NOICF ^
      /OUT:tier0.dll ^
-     kernel32.lib user32.lib advapi32.lib dbghelp.lib odbc32.lib ^
+     kernel32.lib user32.lib advapi32.lib dbghelp.lib odbc32.lib winmm.lib ^
      *.obj || goto :fail
 
 echo.

@@ -136,6 +136,48 @@ static unsigned __stdcall JitterNoise(void *pv)
 	return 0;
 }
 
+typedef void (__cdecl *ThreadSleepFn)(unsigned int);
+
+// Tick pacing: a 100-tick server sleeps 10 ms per tick. Bare ::Sleep()
+// quantizes to ~15.6 ms (tick rate collapses toward 64). Measure actual
+// sleep-to-sleep intervals for a virtual 100-tick frame in both legacy and
+// precise modes (default precise, TIER0_PRECISE_SLEEP=0 = legacy).
+static void BenchTickPacing(ThreadSleepFn pfnSleep, unsigned int ms, unsigned int ticks)
+{
+	LARGE_INTEGER freq;
+	QueryPerformanceFrequency(&freq);
+
+	double t0 = NowSec();
+	pfnSleep(ms);            // cancel warmup/window effects
+	pfnSleep(ms);
+	t0 = NowSec();
+
+	double minGap = 1e9, maxGap = 0.0, sum = 0.0;
+	unsigned int jitter = 0;
+	double prev = NowSec();
+	for (unsigned int i = 0; i < ticks; ++i)
+	{
+		pfnSleep(ms);
+		double now = NowSec();
+		double gap = now - prev;
+		prev = now;
+		if (gap < minGap) minGap = gap;
+		if (gap > maxGap) maxGap = gap;
+		sum += gap;
+		if (gap > (ms * 1.25e-3)) jitter++;   // >25% over target
+	}
+	printf("Tick sleep %-2u ms    : actual %.3f..%.3f ms avg %.3f ms, slow ticks(>%u%%): %u/%u\n",
+		ms, minGap * 1e3, maxGap * 1e3, sum * 1e3 / ticks, (unsigned int)(ms * 25 / 100), jitter, ticks);
+}
+
+void BenchTickPacingBoth(ThreadSleepFn pfnSleep)
+{
+	printf("-- tick pacing (virtual 100/128-tick server frame )\n");
+	BenchTickPacing(pfnSleep, 10, 64);
+	BenchTickPacing(pfnSleep, 7, 64);
+	printf("\n");
+}
+
 static void BenchClockJitter(Plat_FloatTimeFn pfnFloat, IMemAllocB *pAlloc,
 	CreateSimpleThreadFn fnThread, unsigned int iters, int noise)
 {
@@ -291,6 +333,7 @@ int main()
 	Plat_FloatTimeFn pfnFloatTime = (Plat_FloatTimeFn)GetProcAddress(h, "Plat_FloatTime");
 	Plat_MSTimeFn pfnMSTime = (Plat_MSTimeFn)GetProcAddress(h, "Plat_MSTime");
 	CreateSimpleThreadFn pfnThread = (CreateSimpleThreadFn)GetProcAddress(h, "CreateSimpleThread");
+	ThreadSleepFn pfnThreadSleep = (ThreadSleepFn)GetProcAddress(h, "ThreadSleep");
 	size_t *pGpa = (size_t *)GetProcAddress(h, "g_pMemAlloc");
 	IMemAllocB **ppAlloc = (IMemAllocB **)pGpa;
 	IMemAllocB *pAlloc = ppAlloc ? *ppAlloc : NULL;
@@ -350,7 +393,11 @@ int main()
 	printf("-- thread create/join\n");
 	BenchThreadCreateJoin(pfnThread, 200);
 
-	printf("-- cross-thread churn (alloc 4thr -> free main)\n");
+	printf("\n-- tick pacing (default = precise sleep)\n");
+	if (pfnThreadSleep)
+		BenchTickPacingBoth(pfnThreadSleep);
+
+	printf("\n-- cross-thread churn (alloc 4thr -> free main)\n");
 	BenchCrossThreadChurn(pAlloc, pfnThread, 4, 50000, 256);
 
 	printf("--- bench done ---\n");
