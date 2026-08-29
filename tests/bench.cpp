@@ -114,6 +114,69 @@ static void BenchRealloc(IMemAllocB *pAlloc, unsigned int iters)
 		dt * 1e9 / iters, (unsigned int)liveSize, liveSize >= 2048 ? "OK" : "MISMATCH");
 }
 
+// Clock stability: Plat_FloatTime is the engine's frametime source, so any
+// glitch between consecutive reads becomes a visible hitch (jitter). Measure
+// read-to-read continuity in a clean pass and again while a noise thread
+// churns allocations (battle-like contention). QPC deltas "should" be ~100ns,
+// huge gaps mean the clock path stalls or a preemption slipped through.
+struct JitterShared
+{
+	IMemAllocB *p;
+	volatile bool stop;
+};
+
+static unsigned __stdcall JitterNoise(void *pv)
+{
+	JitterShared *s = (JitterShared *)pv;
+	while (!s->stop)
+	{
+		void *q = s->p->Alloc(256);
+		s->p->Free(q, 0);
+	}
+	return 0;
+}
+
+static void BenchClockJitter(Plat_FloatTimeFn pfnFloat, IMemAllocB *pAlloc,
+	CreateSimpleThreadFn fnThread, unsigned int iters, int noise)
+{
+	JitterShared s;
+	s.p = pAlloc;
+	s.stop = false;
+
+	void *h = NULL;
+	if (noise)
+		h = fnThread(JitterNoise, &s, NULL, 0);
+
+	pfnFloat();                    // warmup
+	double prev = pfnFloat();
+	double maxGap = 0.0;
+	unsigned long long bigSpikes = 0;   // > 5 us
+	unsigned long long medSpikes = 0;   // > 1 us
+	for (unsigned int i = 0; i < iters; ++i)
+	{
+		double v = pfnFloat();
+		double gap = v - prev;
+		prev = v;
+		if (gap > maxGap)
+			maxGap = gap;
+		if (gap > 5e-6)
+			bigSpikes++;
+		else if (gap > 1e-6)
+			medSpikes++;
+	}
+
+	if (noise)
+	{
+		s.stop = true;
+		WaitForSingleObject((HANDLE)h, INFINITE);
+		CloseHandle((HANDLE)h);
+	}
+
+	printf("Clock stability     : %s pass max gap %7.2f us, spikes 1-5us %llu / >5us %llu (%9.5f%% >1us)\n",
+		noise ? "noise-t" : "clean  ",
+		maxGap * 1e6, medSpikes, bigSpikes, 100.0 * (double)(medSpikes + bigSpikes) / (double)iters);
+}
+
 // GetSize on LIVE large (non-SBA) blocks: these go through HeapSize() which
 // takes the CRT heap lock -- worth measuring so the number is on record.
 static void BenchGetSizeLive(IMemAllocB *pAlloc, size_t size, unsigned int count)
@@ -261,6 +324,11 @@ int main()
 			dt * 1e9 / 3000000, monotonic ? "monotonic" : "warning: wrapped");
 		printf("\n");
 	}
+
+	printf("-- clock stability (frametime source)\n");
+	BenchClockJitter(pfnFloatTime, pAlloc, pfnThread, 2000000, 0);
+	BenchClockJitter(pfnFloatTime, pAlloc, pfnThread, 2000000, 1);
+	printf("\n");
 
 	size_t sizes[] = { 4, 64, 256, 1024, 2048, 8192, 65536 };
 	unsigned int phaseIters[] = { 200000, 200000, 200000, 50000, 20000, 2000, 128 };

@@ -14,5 +14,6 @@ PLATFORM_INTERFACE int64 g_ulLastCycleSample;
 PLATFORM_INTERFACE int g_cBadCycleCountReceived;
 
 uint64 CalculateCPUFreq();
+void InitFastTimer();
 
 #endif // FASTTIMER_H

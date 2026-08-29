@@ -627,6 +627,8 @@ void CVProfile::MarkFrame()
 
 	if ( s_LastSample != 0 )
 	{
+		if ( !g_dwClockSpeed )
+			InitFastTimer();          // profiling may start before the clock is calibrated
 		m_flTimeLastFrame = ( double )( now - s_LastSample )  / ( double )g_dwClockSpeed * 1000.0;
 	}
 
