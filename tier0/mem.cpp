@@ -1344,7 +1344,7 @@ int CStdMemAlloc::CrtDbgReport( int nRptType, const char* szFile,
 
 int CStdMemAlloc::heapchk()
 {
-	return -2; // _HEAPOK in original MSVC CRT (not UCRT's 0)
+	return 2; // _HEAPOK (legacy MSVC CRT value, matches the era of the original DLL)
 }
 
 bool CStdMemAlloc::IsDebugHeap()

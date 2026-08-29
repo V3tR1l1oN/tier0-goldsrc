@@ -481,7 +481,6 @@ void CVProfile::Stop()
 	{
 		m_Enabled = 0;
 		m_Root.ExitScope();
-		m_Root.ExitScope();
 	}
 }
 

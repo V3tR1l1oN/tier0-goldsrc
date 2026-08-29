@@ -124,9 +124,11 @@ void MiniDumpWriter( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pE
 	if ( pWriteDump )
 	{
 		__time64_t Time = _time64( 0 );
+		struct tm tmBuf;
+		memset( &tmBuf, 0, sizeof( tmBuf ) );
 		struct tm* v6 = _localtime64( &Time );
 		++g_MiniDumpCount;
-		struct tm * v7 = v6;
+		struct tm * v7 = v6 ? v6 : &tmBuf;
 
 		char Filename[ MAX_PATH ];
 

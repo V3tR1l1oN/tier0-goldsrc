@@ -207,7 +207,7 @@ void Test_RunFrame()
 }
 
 bool Test_IsActive()			{ return g_TestHarness.m_bTestActive; }
-void Test_SetFailed()			{ static volatile bool s_bTestFailed = false; s_bTestFailed = true; }
+void Test_SetFailed()			{ g_TestHarness.m_bTestFailed = true; }
 bool Test_HasFailed()			{ return g_TestHarness.m_bTestFailed; }
 
 bool Test_HasFinished()

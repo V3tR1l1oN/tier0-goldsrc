@@ -592,6 +592,8 @@ void CThreadFastMutex::Lock( unsigned timeout ) const volatile
 
 	const uint32 self = FM_CurrentThreadId();
 
+	const DWORD tStart = GetTickCount();
+
 	while ( true )
 	{
 		if ( *pOwner == self )
@@ -606,9 +608,11 @@ void CThreadFastMutex::Lock( unsigned timeout ) const volatile
 			return;
 		}
 
-		if ( timeout != TT_INFINITE && timeout-- == 0 )
+		if ( timeout != TT_INFINITE && ( GetTickCount() - tStart ) >= timeout )
 		{
-			continue;
+			// Bounded wait: give up without acquiring rather than spinning
+			// forever once the budget is exhausted.
+			return;
 		}
 
 		// Backoff: a few pause-stall cycles keep the cache line in the exclusive
@@ -823,11 +827,18 @@ bool CThread::Terminate( int result )
 {
 	// Original t=o: after a successful TerminateThread the handle/thread-id are
 	// zeroed so a later ~CThread / Join does not touch a dead thread object.
+	// Closing the raw handle here is safe: the destructor's CloseHandle(NULL)
+	// becomes a no-op, and no runner touches m_hThread afterwards on this path.
 	if ( !TerminateThread( m_hThread, result ) )
 		return false;
 
+	void *hThread = m_hThread;
 	m_hThread = NULL;
 	m_threadId = 0;
+
+	if ( hThread )
+		CloseHandle( hThread );
+
 	return true;
 }
 

@@ -157,7 +157,7 @@ void SpewAndLogActivate( const tchar *pGroupName, int level, int logLevel )
 	{
 		int index;
 
-		SpewGroup_t* pGroup;
+SpewGroup_t* pGroup;
 
 		if( FindSpewGroup( pGroupName, &index ) )
 		{
@@ -165,19 +165,29 @@ void SpewAndLogActivate( const tchar *pGroupName, int level, int logLevel )
 		}
 		else
 		{
-			if( s_pSpewGroups )
+			// FindSpewGroup's binary-search probe does not yield a reliable
+			// insertion point when the new name sorts after the last probed
+			// entry, so (re)locate the position with a linear pass. Inserting
+			// out of order would silently make the search fail forever and
+			// every repeated SpewActivate would append a duplicate group.
+			index = 0;
+			while( index < s_GroupCount && _tcsicmp( pGroupName, s_pSpewGroups[ index ].m_GroupName ) > 0 )
+				++index;
+
+			SpewGroup_t *pNew = ( SpewGroup_t* ) realloc( s_pSpewGroups, sizeof( SpewGroup_t ) * ( s_GroupCount + 1 ) );
+			if( !pNew )
+				return;
+			s_pSpewGroups = pNew;
+
+			if( index < s_GroupCount )
 			{
-				s_pSpewGroups = ( SpewGroup_t* ) realloc( s_pSpewGroups, sizeof( SpewGroup_t ) * ( s_GroupCount + 1 ) );
-				pGroup = &s_pSpewGroups[ index ];
-				memmove( s_pSpewGroups + index + 1, pGroup, sizeof( SpewGroup_t ) * ( s_GroupCount - index ) );
-			}
-			else
-			{
-				s_pSpewGroups = ( SpewGroup_t* ) malloc( sizeof( SpewGroup_t ) * ( s_GroupCount + 1 ) );
-				pGroup = s_pSpewGroups;
+				memmove( &s_pSpewGroups[ index + 1 ], &s_pSpewGroups[ index ],
+					sizeof( SpewGroup_t ) * ( s_GroupCount - index ) );
 			}
 
+			pGroup = &s_pSpewGroups[ index ];
 			_tcscpy( pGroup->m_GroupName, pGroupName );
+			++s_GroupCount;
 		}
 
 		pGroup->m_Level = level;

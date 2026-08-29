@@ -121,9 +121,9 @@ CAssertDisable* IgnoreAssertsNearby( int nRange )
 {
 	auto pAssertDisable = CreateNewAssertDisable( g_Info.m_pFilename );
 
-	//TODO: does this really need to be both min and max? - Solokiller
+	// Symmetric window around the current line: [line - nRange, line + nRange].
 	pAssertDisable->m_LineMin = g_Info.m_iLine - nRange;
-	pAssertDisable->m_LineMax = g_Info.m_iLine - nRange;
+	pAssertDisable->m_LineMax = g_Info.m_iLine + nRange;
 
 	return pAssertDisable;
 }

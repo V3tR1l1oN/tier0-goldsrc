@@ -186,10 +186,7 @@ void *MemAllocScratch( unsigned long nBytes )
 	size_t offset = s_nScratchBufAllocated;
 	s_nScratchBufAllocated += nBytes;
 
-	if ( s_nScratchDepth < SCRATCH_MAX_DEPTH )
-	{
-		s_ScratchSizes[ s_nScratchDepth ] = nBytes;
-	}
+	s_ScratchSizes[ s_nScratchDepth % SCRATCH_MAX_DEPTH ] = nBytes;
 	s_nScratchDepth++;
 
 	void *pResult = ( byte * )s_pScratchBuf + offset;
@@ -203,10 +200,7 @@ void MemFreeScratch()
 	if ( s_nScratchDepth > 0 )
 	{
 		s_nScratchDepth--;
-		if ( s_nScratchDepth < SCRATCH_MAX_DEPTH )
-		{
-			s_nScratchBufAllocated -= s_ScratchSizes[ s_nScratchDepth ];
-		}
+		s_nScratchBufAllocated -= s_ScratchSizes[ s_nScratchDepth % SCRATCH_MAX_DEPTH ];
 	}
 	s_ScratchMutex.Unlock();
 }
