@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "minidump.h"
 #include <tlhelp32.h>
 
 #ifdef WIN32
@@ -38,6 +39,35 @@ static const char *GetCrashLogPath()
 	}
 
 	return g_szCrashLogPath;
+}
+
+// Keeps crash.log bounded: once it grows past 8 MB the old content is rotated
+// to crash_prev.log (kept as the previous crash, overwritten by the next
+// rotation). Long-running play sessions with many crashes no longer grind out a
+// multi-hundred-MB log file.
+static const unsigned long CRASH_LOG_ROTATE_BYTES = 8u << 20;
+
+static void RotateCrashLogIfNeeded()
+{
+	WIN32_FILE_ATTRIBUTE_DATA fad;
+	if ( !GetFileAttributesExA( GetCrashLogPath(), GetFileExInfoStandard, &fad ) )
+		return;                 // no log yet
+
+	ULARGE_INTEGER size;
+	size.LowPart = fad.nFileSizeLow;
+	size.HighPart = fad.nFileSizeHigh;
+
+	if ( size.QuadPart < CRASH_LOG_ROTATE_BYTES )
+		return;
+
+	char prevPath[MAX_PATH];
+	int n = _snprintf( prevPath, sizeof( prevPath ), "%s", GetCrashLogPath() );
+	if ( n > 4 && n < MAX_PATH )
+	{
+		prevPath[ n - 4 ] = '\0';            // strip ".log"
+		strcat( prevPath, "_prev.log" );
+		MoveFileExA( GetCrashLogPath(), prevPath, MOVEFILE_REPLACE_EXISTING );
+	}
 }
 
 static void WriteLog(const char *text, int len)
@@ -136,6 +166,8 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
 
     if ( reason )
     {
+        RotateCrashLogIfNeeded();
+
         HANDLE hFile = CreateFileA(GetCrashLogPath(),
             FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
@@ -209,6 +241,8 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
                 CloseHandle(hFile);
             }
         }
+
+        WriteMiniDumpForException(code, pExceptionInfo);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }

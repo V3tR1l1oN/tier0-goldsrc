@@ -193,6 +193,20 @@ void MiniDumpWriter( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pE
 	MiniDumpUnlock();
 }
 
+void WriteMiniDumpForException( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pExceptionInfo )
+{
+	// Opt-in crash dump: only when TIER0_MD=1. Off by default so crash logging
+	// stays lightweight for normal play; turn it on to get a real .mdmp with
+	// the crashing registers alongside crash.log.
+	if ( !uExceptionCode || !pExceptionInfo || !pExceptionInfo->ExceptionRecord )
+		return;
+
+	if ( !getenv( "TIER0_MD" ) || getenv( "TIER0_MD" )[ 0 ] != '1' )
+		return;
+
+	MiniDumpWriter( uExceptionCode, pExceptionInfo );
+}
+
 #else
 PLATFORM_INTERFACE void WriteMiniDump()
 {
