@@ -78,21 +78,18 @@ CVProfNode::CVProfNode( const tchar *pszName, int detailLevel, CVProfNode *pPare
 	m_iClientData		= -1;
 	m_BudgetGroupID		= 0;
 
+m_pszName = NULL;
 	if ( pszName )
 	{
 		size_t nBytes	= ( _tcslen( pszName ) + 1 ) * sizeof( tchar );
 		tchar *pszCopy	= ( tchar * )malloc( nBytes );
 
-		if ( pszCopy == NULL )
-			return;
-
-		memcpy( pszCopy, pszName, nBytes );
-		pszCopy[ ( nBytes / sizeof( tchar ) ) - 1 ] = '\0';
-		m_pszName = pszCopy;
-	}
-	else
-	{
-		m_pszName = NULL;
+		if ( pszCopy )
+		{
+			memcpy( pszCopy, pszName, nBytes );
+			pszCopy[ ( nBytes / sizeof( tchar ) ) - 1 ] = '\0';
+			m_pszName = pszCopy;
+		}
 	}
 
 	m_pvOrigNameAddress = pszName;

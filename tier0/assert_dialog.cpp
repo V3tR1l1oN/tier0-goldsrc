@@ -82,8 +82,13 @@ PLATFORM_INTERFACE bool DoNewAssertDialog( const tchar *pFilename, int line, con
 
 								if( pPrev )
 									pPrev->m_pNext = pNext->m_pNext;
+								else
+									g_pAssertDisables = pNext->m_pNext;
 
-								delete pNext;
+								CAssertDisable* pDel = pNext;
+								pNext = pDel->m_pNext;
+
+								delete pDel;
 
 								//Skip iterator increment.
 								continue;
