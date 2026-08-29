@@ -376,21 +376,39 @@ static unsigned int PopCount( unsigned int x )
 	return c;
 }
 
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+extern "C" __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *, unsigned long *, unsigned long *);
+
 // Counts the total logical processors (threads) and physical cores via the
 // modern Windows API (Win7+). Falls back to GetActiveProcessorCount, then to
 // the legacy GetSystemInfo count, so the numbers stay sane on any OS.
+//
+// The engine consumes these counts to size its worker/loader thread pools, so
+// they must reflect the CPU set this process is actually allowed to run on.
+// Over-reporting the full machine when a process is pinned (affinity: launch
+// options, hosting services, 'start /affinity') oversubscribes the pool and
+// causes scheduling jitter. Each core/thread mask is therefore intersected
+// with the process affinity mask; cores the process cannot use are dropped
+// from both counts. Group 0 covers every core on <=64-logical machines; on
+// larger systems the flat affinity mask only describes group 0 (noted below).
 static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 {
 	nLogical = 0;
 	nPhysical = 0;
 
+	unsigned long dwProcAff = 0, dwSysAff = 0;
+	const int bRestricted = GetProcessAffinityMask( GetCurrentProcess(), &dwProcAff, &dwSysAff )
+		&& dwProcAff != ( unsigned long )~0; // process pinned to a subset of CPUs
+
 	DWORD dwSize = 0;
-	GetLogicalProcessorInformationEx( RelationProcessorCore, nullptr, &dwSize );
+	GetLogicalProcessorInformationEx( RelationAll, nullptr, &dwSize ); // probe: required buffer size
 
 	if( dwSize == 0 )
 	{
 		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
 		nPhysical = nLogical;
+		if( bRestricted )
+			nLogical = PopCount( dwProcAff ); // fallback path must stay affinity-aware
 		return;
 	}
 
@@ -404,7 +422,8 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 		return;
 	}
 
-	if( GetLogicalProcessorInformationEx( RelationAll, pBuf, &dwSize ) )
+	const BOOL rcAll = GetLogicalProcessorInformationEx( RelationAll, pBuf, &dwSize );
+	if( rcAll )
 	{
 		SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* p = pBuf;
 		size_t off = 0;
@@ -414,12 +433,20 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 			switch( p->Relationship )
 			{
 				case RelationProcessorCore:
-					++nPhysical;
+				{
+					unsigned long coreMask = 0;
 					for( unsigned int k = 0; k < p->Processor.GroupCount; ++k )
-					{
-						nLogical += PopCount( ( unsigned int ) p->Processor.GroupMask[ k ].Mask );
-					}
+						coreMask |= ( unsigned long ) p->Processor.GroupMask[ k ].Mask;
+
+					if( bRestricted )
+						coreMask &= dwProcAff;
+					if( coreMask == 0 )
+						break; // core outside this process's affinity -- ignore entirely
+
+					++nPhysical;
+					nLogical += PopCount( coreMask );
 					break;
+				}
 				default:
 					break;
 			}

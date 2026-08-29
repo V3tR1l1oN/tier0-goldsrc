@@ -61,6 +61,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "test_sba_mt 6M failed: $LASTEXITCODE" }
           Write-Host "test_sba_mt 6M: OK"
 
+      - name: CPU report contract (incl. pinned affinity)
+        shell: pwsh
+        run: |
+          & tests\test_cpu.exe *> $null
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_cpu failed: $LASTEXITCODE" }
+          & tests\test_cpu.exe 4 *> $null
+          if ($LASTEXITCODE -ne 0) { Write-Error "test_cpu 4 (pinned) failed: $LASTEXITCODE" }
+          Write-Host "test_cpu: OK (default + pinned 4)"
+
       - name: Run fallback mode suite (SBA_ARENA=0)
         shell: pwsh
         run: |

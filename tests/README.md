@@ -12,6 +12,7 @@
 | `test_crash.cpp` | Проверка краш-лога: `test_crash.exe heap` → должна писаться запись `Reason=HEAP_CORRUPTION`, `test_crash.exe brk` → `Reason=BREAKPOINT`; процесс падает с соответствующим EXCEPTION-кодом |
 | `test_getsize2048.cpp` | Регрессия живых крупных блоков: 2000 блоков по 2048 Б с мгновенной проверкой `GetSize==2048` и `Realloc 64->2048` с сохранением префикса и `GetSize==2048`. Плюс CRT-крупные: точный `GetSize` на 20480 и 65536, `Realloc 256->20480/65536`, переезд `20480/65536 <-> 2048` в обе стороны. Валидирует адаптивные слабы 8192 Б, таблицу `bucket -> payload` и честный размер крупных блоков |
 | `probe_malloc.cpp` | Контроль скорости «голому» CRT-аллокатору (80k×4096 alloc+write+free ≈ 92–97 ms) — бенчмарк, доказывающий, что узкое место было не в CRT-куче |
+| `test_cpu.cpp` | Контракт «движок ↔ ПК»: компилит снабжённые `tier0/cpu.cpp` + `tier0/fasttimer.cpp` и проверяет отчёт `GetCPUInformation()` — иерархию фич (SSE41≤SSE3≤SSE2, AVX≤SSE42…), топологию (физические ≤ логические), скорость в здравом диапазоне, консистентность `g_ClockSpeed/множители`; с аргументом `N` захватывает процесс на N CPU и требует `logical==N` (affinity-контракт). До фикса детект вообще падал в fallback: буфер `RelationAll` брался по пробу `RelationProcessorCore`, ядра молча считались «всеми» |
 | `test_exports.cpp` | Сверка экспортного манифеста: 313/313 имён из `tier0.def`, ординалы строго 1..313, каждый экспорт резолвится `GetProcAddress` и по имени, и по ординалу в один и тот же адрес; вызов безопасного подмножества (`Plat_FloatTime`, `Plat_MSTime`) |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime`/`Plat_MSTime` (ns/call), стабильность часов (гэпы между соседними отсчётами frametime в чистом прогоне и под шумом-аллокатором), pacing тиков (`ThreadSleep(10/7)` — реальные интервалы пробуждения, чистые и под боевой загрузкой; legacy `Sleep` даёт 15.0/14.6 мс, точный сон — 10.02/7.00 мс даже под аллокаторным шумом), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048, `GetSize` живых крупных блоков 8192/65536, thread create+join, кросс-поточный churn (4 потока alloc → main free); проверка `GetSize` (реальный размер ≥ заказанного) |
 | `test_sba_mt.cpp` | Харнесс контенции глобального лока SBA: 1/4/16 потоков × чурн 4..2048 (`test_sba_mt.exe iters`); выводит ms и ns/op на поток — помогает принимать решения о переносе локов |
@@ -25,6 +26,7 @@
 ```
 cl /O1 /GS- /nologo tests\test_vprof.cpp /Fetests\test_vprof.exe /link /SUBSYSTEM:CONSOLE user32.lib
 cl /O1 /GS- /nologo tests\test_mem.cpp /Fetests\test_mem.exe /link /SUBSYSTEM:CONSOLE
+cl /O1 /GS- /nologo /I "%~dp0..\public\tier0" tests\test_cpu.cpp /Fetests\test_cpu.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\test_exports.cpp /Fetests\test_exports.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\sba_diag.cpp /Fetests\sba_diag.exe /link /SUBSYSTEM:CONSOLE
 cl /O2 /GS- /nologo tests\test_sba_stress.cpp /Fetests\test_sba_stress.exe /link /SUBSYSTEM:CONSOLE
@@ -104,6 +106,15 @@ exit code 0
 Любой не-нулевой exit, краш, `live GetSize`≠`0xFFFFFFFF` или расхождение
 содержимого в стресс-тесте — признак регрессии в `tier0/mem.cpp`
 (ресайклинг/хэш-карта слабов/таблицы хот-пути/адаптивные слабы).
+
+```
+tests\test_cpu.exe          -> test_cpu: OK logical=12 physical=6 speed=3293MHz vendor=AuthenticAMD
+tests\test_cpu.exe 4        -> test_cpu: OK logical=4  physical=2 ...   (affinity-захват)
+```
+
+`test_cpu.exe N` переводит собственный процесс на N CPU до детекта и требует
+`logical == N` — так доказывается, что движку репортится именно маска
+процесса, а не вся машина.
 
 `test_sba_mt.exe 6000000` — главный воспроизводитель lock-free гонки
 `SBASlabMap` (редкий ACCESS_VIOLATION при арене + фоновом прекеше):
