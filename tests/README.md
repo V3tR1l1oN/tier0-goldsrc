@@ -105,6 +105,13 @@ exit code 0
 содержимого в стресс-тесте — признак регрессии в `tier0/mem.cpp`
 (ресайклинг/хэш-карта слабов/таблицы хот-пути/адаптивные слабы).
 
+`test_sba_mt.exe 6000000` — главный воспроизводитель lock-free гонки
+`SBASlabMap` (редкий ACCESS_VIOLATION при арене + фоновом прекеше):
+после фикса прогон 15× подряд — чистый exit 0. Переменные окружения для
+арены: `SBA_ARENA=0` (fallback на CRT malloc), `SBA_ARENA_MB` (target
+прекеша, default = min(резерв, max(64, freeRAM/8))), `SBA_RESERVE_MB`
+(дефолт 512), `SBA_PREPAGE=0` (отключить фоновый поток).
+
 `test_crash.exe` пишет в `crash.log` рядом с DLL:
 `Reason=HEAP_CORRUPTION` / `Reason=BREAKPOINT` с дампом регистров и стека.
 Запускать по одному процессу на режим (процесс завершается по exeption-коду).

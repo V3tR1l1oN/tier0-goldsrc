@@ -7,6 +7,8 @@
 #include "platform.h"
 #include "dbg.h"
 #include <malloc.h>
+#include <process.h>
+#include <stdlib.h>
 
 #ifdef WIN32
 #include "winlite.h"
@@ -41,6 +43,250 @@ namespace
 	const unsigned SBA_NO_BUCKET = 0xFFFFFFFF;
 
 	bool g_sbaReady = false;    // flushes on thread detach must not touch a torn-down SBA
+
+	// -----------------------------------------------------------------------------
+	// Slab memory arena. Slab backing comes from one big virtual reservation that
+	// is committed and prefaulted ahead of demand by a low-priority helper thread,
+	// so map/resource loads hit warm pages instead of cold page-fault storms and
+	// fresh-slab carve never pays lazy-commit syscalls on the critical path.
+	// Frozen (fully returned) slabs recycle per size class without touching the OS.
+	// Falls back to CRT malloc if the reservation fails. Tuning env vars:
+	//   SBA_ARENA=0       disable the arena entirely
+	//   SBA_RESERVE_MB=n  reservation size (default 512)
+	//   SBA_ARENA_MB=n    prefault target (default min(reserve, max(64, freeRAM/8)))
+	// -----------------------------------------------------------------------------
+
+	enum { SBA_ARENA_4K = 4096, SBA_ARENA_8K = 8192 };
+
+	struct SBArena
+	{
+		unsigned char *base;       // reserved VA block; NULL = off
+		size_t reserve;            // reservation size
+		size_t commitEnd;          // committed frontier (page-aligned)
+		size_t handout;            // next fresh 4K chunk (page-aligned)
+		size_t touched;            // prefaulted frontier (page-aligned)
+		size_t target;             // prefault target bytes
+		void *fl4k;                // recycled 4K chunks
+		void *fl8k;                // recycled 8K chunks
+		CRITICAL_SECTION cs;
+		HANDLE hPrepage;
+		volatile long stop;
+
+		SBArena()
+			: base( NULL ), reserve( 0 ), commitEnd( 0 ), handout( 0 ), touched( 0 ),
+			  target( 0 ), fl4k( NULL ), fl8k( NULL ), hPrepage( NULL ), stop( 0 )
+		{
+			InitializeCriticalSection( &cs );
+		}
+
+		~SBArena()
+		{
+			if ( hPrepage )
+			{
+				InterlockedExchange( &stop, 1 );
+				WaitForSingleObject( hPrepage, 3000 );
+				CloseHandle( hPrepage );
+				hPrepage = NULL;
+			}
+			DeleteCriticalSection( &cs );
+			if ( base )
+				VirtualFree( base, 0, MEM_RELEASE );
+		}
+	};
+
+	static SBArena g_arena;
+	static volatile long g_arenaStarted = 0;
+
+	static unsigned __stdcall SBArena_PrepageThread( void * )
+	{
+		SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL );
+
+		for ( ;; )
+		{
+			if ( g_arena.stop )
+				break;
+
+			EnterCriticalSection( &g_arena.cs );
+
+			size_t want = 0;
+			if ( g_arena.touched < g_arena.target )
+			{
+				// Pages BELOW the handout frontier are live slabs (or committed
+				// for allocation); only prefault the still-free region above it.
+				// We hold cs here, so handout cannot move during the slice.
+				if ( g_arena.touched < g_arena.handout )
+					g_arena.touched = g_arena.handout;
+				size_t limit = g_arena.target;
+				if ( limit > g_arena.reserve )
+					limit = g_arena.reserve;
+				if ( limit > g_arena.touched )
+					want = limit - g_arena.touched;
+			}
+
+			if ( want == 0 )
+			{
+				LeaveCriticalSection( &g_arena.cs );
+				Sleep( 8 );
+				continue;
+			}
+
+			// Commit ahead of the touch in 256 KB slices, then touch under the
+			// lock so the slice never overlaps a page handed out meanwhile.
+			size_t grow = want < ( 256u << 10 ) ? want : ( 256u << 10 );
+			size_t off = g_arena.touched;
+			if ( g_arena.commitEnd < off + grow )
+			{
+				size_t add = off + grow - g_arena.commitEnd;
+				if ( g_arena.commitEnd + add > g_arena.reserve )
+					add = g_arena.reserve - g_arena.commitEnd;
+				if ( add && !VirtualAlloc( g_arena.base + g_arena.commitEnd, add,
+						MEM_COMMIT, PAGE_READWRITE ) )
+					add = 0;
+				g_arena.commitEnd += add;
+				if ( add == 0 )
+					grow = 0;
+			}
+			if ( grow )
+			{
+				for ( size_t p = off; p < off + grow; p += 4096 )
+					*( volatile unsigned char * )( g_arena.base + p ) = 0;
+				g_arena.touched = off + grow;
+			}
+			LeaveCriticalSection( &g_arena.cs );
+			Sleep( 0 );            // never consume a whole core
+		}
+
+		return 0;
+	}
+
+	static bool SBArena_Start()     // one-shot; may be called from any thread, not under any lock
+	{
+		if ( g_arena.base )
+			return true;
+
+		if ( InterlockedExchange( &g_arenaStarted, 1 ) )
+			return g_arena.base != NULL;      // another thread is initializing
+
+		const char *pOff = getenv( "SBA_ARENA" );
+		if ( pOff && pOff[ 0 ] == '0' )
+			return false;
+
+		unsigned reserveMB = 512;
+		const char *pRes = getenv( "SBA_RESERVE_MB" );
+		if ( pRes )
+		{
+			unsigned v = ( unsigned )atoi( pRes );
+			if ( v >= 16 && v <= 1024 )
+				reserveMB = v;
+		}
+
+		unsigned char *b = ( unsigned char * )VirtualAlloc( NULL,
+			(size_t)reserveMB << 20, MEM_RESERVE, PAGE_READWRITE );
+		if ( !b )
+			return false;
+
+		size_t freeRAM = 0;
+		MEMORYSTATUSEX ms;
+		ms.dwLength = sizeof( ms );
+		if ( GlobalMemoryStatusEx( &ms ) )
+			freeRAM = ( size_t )( ms.ullAvailPhys >> 20 );
+
+		size_t targetMB = freeRAM / 8;
+		if ( targetMB < 64 )
+			targetMB = 64;
+		if ( targetMB > (size_t)reserveMB )
+			targetMB = reserveMB;
+
+		const char *pTgt = getenv( "SBA_ARENA_MB" );
+		if ( pTgt )
+		{
+			unsigned v = ( unsigned )atoi( pTgt );
+			if ( v >= 1 && v <= 1024 )
+				targetMB = v;
+		}
+
+		g_arena.base = b;
+		g_arena.reserve = (size_t)reserveMB << 20;
+		g_arena.target = targetMB << 20;
+
+		const char *pPg = getenv( "SBA_PREPAGE" );
+		if ( !pPg || pPg[ 0 ] != '0' )
+		{
+			unsigned threadID = 0;
+			g_arena.hPrepage = ( HANDLE )_beginthreadex( NULL, 0, SBArena_PrepageThread,
+				NULL, 0, ( unsigned * )&threadID );
+		}
+		if ( !g_arena.hPrepage )
+			g_arena.hPrepage = NULL;
+
+		return true;
+	}
+
+	static void *SBArena_Alloc( size_t bytes )     // 4096 or 8192
+	{
+		unsigned char *p = NULL;
+
+		if ( g_arena.base )
+		{
+			EnterCriticalSection( &g_arena.cs );
+
+			if ( bytes <= SBA_ARENA_4K )
+			{
+				if ( g_arena.fl4k ) { p = ( unsigned char * )g_arena.fl4k; g_arena.fl4k = *( void ** )p; }
+			}
+			else
+			{
+				if ( g_arena.fl8k ) { p = ( unsigned char * )g_arena.fl8k; g_arena.fl8k = *( void ** )p; }
+			}
+
+			if ( !p )
+			{
+				size_t need = ( bytes <= SBA_ARENA_4K ) ? SBA_ARENA_4K : SBA_ARENA_8K;
+				if ( g_arena.handout + need <= g_arena.reserve )
+				{
+					p = g_arena.base + g_arena.handout;
+					g_arena.handout += need;
+				}
+			}
+
+			if ( p )
+			{
+				size_t off = ( size_t )( p - g_arena.base );
+				if ( off + bytes > g_arena.commitEnd )
+				{
+					size_t add = off + bytes - g_arena.commitEnd;
+					if ( !VirtualAlloc( g_arena.base + g_arena.commitEnd, add,
+							MEM_COMMIT, PAGE_READWRITE ) )
+					{
+						// Rare out-of-RAM case: drop the fresh chunk (never touch
+						// its uncommitted pages) and fall back to the CRT heap.
+						p = NULL;
+					}
+					else
+						g_arena.commitEnd += add;
+				}
+			}
+
+			LeaveCriticalSection( &g_arena.cs );
+		}
+
+		return p ? p : ( unsigned char * )malloc( bytes );
+	}
+
+	static void SBArena_Free( void *pv, size_t bytes )     // 4096 or 8192
+	{
+		unsigned char *p = ( unsigned char * )pv;
+		if ( !g_arena.base || p < g_arena.base || p >= g_arena.base + g_arena.reserve )
+		{
+			free( pv );          // allocated on the malloc fallback path
+			return;
+		}
+
+		EnterCriticalSection( &g_arena.cs );
+		if ( bytes <= SBA_ARENA_4K ) { *( void ** )p = g_arena.fl4k; g_arena.fl4k = p; }
+		else { *( void ** )p = g_arena.fl8k; g_arena.fl8k = p; }
+		LeaveCriticalSection( &g_arena.cs );
+	}
 
 	unsigned SBARound( size_t size )
 	{
@@ -140,6 +386,7 @@ struct SBASlab
 	struct SBASlabMap
 	{
 		static const unsigned CAP0 = 1024;
+		static const unsigned MAX_WALK = 64;
 
 		struct Node
 		{
@@ -149,36 +396,81 @@ struct SBASlab
 			Node *next;
 		};
 
-		Node **tab;
-		unsigned cap;
-		unsigned mask;
+		// tab/mask/cap are volatile because FindPage is called WITHOUT the lock
+		// (SBAFastClassify). Publishing order is tab, then mask, then cap; a
+		// lock-free reader that reads mask BEFORE tab (and gates on mask) can
+		// only ever observe (old mask, old tab), (old mask, new tab) or
+		// (new mask, new tab) -- never an out-of-bounds (new mask, old tab):
+		// on x86/TSO the tab store precedes the mask store, so the moment the
+		// mask store is visible to a reader the tab store is visible too.
+		// Retired tables and retired nodes are never returned to the OS: slot
+		// drops/chains that a concurrent reader is mid-walk stay mapped forever,
+		// so a stale walk can only miss (falling through to LinearClassify under
+		// the lock), never fault. Memory stays bounded by the live high-water
+		// mark (each generation of the table is ~2x the previous one, and the
+		// node pool peaks at the largest live slab count).
+		Node ** volatile tab;
+		volatile unsigned cap;
+		volatile unsigned mask;
 		size_t used;
+		Node *pool;              // retired nodes (never freed, reused on insert)
+		Node ***retired;         // retired tab arrays (never freed)
+		size_t retiredCount;
 
-		SBASlabMap() : tab( nullptr ), cap( 0 ), mask( 0 ), used( 0 ) {}
+		SBASlabMap() : tab( nullptr ), cap( 0 ), mask( 0 ), used( 0 ),
+			pool( nullptr ), retired( nullptr ), retiredCount( 0 ) {}
 
 		~SBASlabMap()
 		{
+			for ( size_t i = 0; i < retiredCount; ++i )
+				free( ( void * )retired[ i ] );
+			free( ( void * )retired );
 			if ( tab )
+				free( ( void * )tab );
+			for ( Node *n = pool; n; )
 			{
-				for ( unsigned i = 0; i < cap; ++i )
-				{
-					for ( Node *n = tab[ i ]; n; )
-					{
-						Node *nx = n->next;
-						free( n );
-						n = nx;
-					}
-				}
-				free( tab );
+				Node *nx = n->next;
+				free( n );
+				n = nx;
 			}
 		}
 
-		bool Grow()
+		void RetireTab( Node **t )       // caller holds the lock
+		{
+			Node ***nr = ( Node *** )realloc( retired, ( retiredCount + 1 ) * sizeof( Node ** ) );
+			if ( !nr )
+			{
+				free( t );
+				return;
+			}
+			retired = nr;
+			retired[ retiredCount++ ] = t;
+		}
+
+		Node *GetNode()                  // caller holds the lock
+		{
+			if ( pool )
+			{
+				Node *n = pool;
+				pool = n->next;
+				return n;
+			}
+			return ( Node * )malloc( sizeof( Node ) );
+		}
+
+		void PutNode( Node *n )          // caller holds the lock
+		{
+			n->next = pool;
+			pool = n;
+		}
+
+		bool Grow()                      // caller holds the lock
 		{
 			unsigned newCap = cap ? cap * 2 : CAP0;
 			Node **nt = ( Node ** )calloc( newCap, sizeof( Node * ) );
 			if ( !nt )
 				return false;
+
 			size_t live = 0;
 			if ( tab )
 			{
@@ -194,23 +486,23 @@ struct SBASlab
 						n = nx;
 					}
 				}
-				free( tab );
+				RetireTab( ( Node ** )tab );
 			}
-			tab = nt;
-			cap = newCap;
-			mask = newCap - 1;
+			tab = nt;                    // publish table first...
+			mask = newCap - 1;           // ...then the mask that indexes it,
+			cap = newCap;                // ...then the write-side gate
 			used = live;
 			return true;
 		}
 
-		void InsertKey( SBASlab *s, unsigned page, unsigned char *addr )
+		void InsertKey( SBASlab *s, unsigned page, unsigned char *addr )   // caller holds the lock
 		{
 			if ( cap == 0 || used * 2 >= cap )
 			{
 				if ( !Grow() )
 					return;            // not indexed; linear scan covers it
 			}
-			Node *n = ( Node * )malloc( sizeof( Node ) );
+			Node *n = GetNode();
 			if ( !n )
 				return;
 			n->sl = s;
@@ -222,7 +514,7 @@ struct SBASlab
 			++used;
 		}
 
-		void Insert( SBASlab *s )
+		void Insert( SBASlab *s )                          // caller holds the lock
 		{
 			unsigned p1 = ( unsigned )( ( size_t )s->base >> 12 );
 			unsigned pLast = ( unsigned )( ( size_t )( s->base + SBASlabBytes( s->bucket ) - 1 ) >> 12 );
@@ -234,33 +526,36 @@ struct SBASlab
 			}
 		}
 
-		void Remove( SBASlab *sl, unsigned char *addr )
+		void Remove( SBASlab *sl, unsigned char *addr )                      // caller holds the lock
 		{
 			if ( !cap )
 				return;
 			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & mask;
-			for ( Node **pp = &tab[ j ]; *pp; pp = &( *pp )->next )
+			for ( Node **pp = ( Node ** )&tab[ j ]; *pp; pp = &( *pp )->next )
 			{
 				if ( ( *pp )->sl == sl )
 				{
 					Node *n = *pp;
 					*pp = n->next;
-					free( n );
+					PutNode( n );
 					--used;
 					return;
 				}
 			}
 		}
 
-		SBASlab *FindPage( unsigned char *addr )
+		SBASlab *FindPage( unsigned char *addr )        // may run WITHOUT the lock
 		{
-			if ( !cap )
+			unsigned m = mask;
+			if ( !m )
 				return nullptr;
-			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & mask;
-			for ( Node *n = tab[ j ]; n; n = n->next )
+			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & m;
+			Node *n = ( Node * )tab[ j ];
+			for ( unsigned hops = 0; n && hops < MAX_WALK; ++hops )
 			{
 				if ( addr >= n->base && addr < n->base + SBASlabBytes( n->sl->bucket ) )
 					return n->sl;      // shared page: the other owner holds the other range
+				n = n->next;
 			}
 			return nullptr;
 		}
@@ -302,7 +597,7 @@ struct SBASlab
 			while ( m_slabs )
 			{
 				SBASlab *next = m_slabs->next;
-				free( m_slabs->base );
+				SBArena_Free( m_slabs->base, SBASlabBytes( m_slabs->bucket ) );
 				m_slabs = next;
 			}
 			LeaveCriticalSection( &m_cs );
@@ -443,7 +738,8 @@ struct SBASlab
 			unsigned payload = SBAPayload( bucket );
 			unsigned slot = SBASlot( payload );
 			unsigned slabBytes = SBASlabBytesForSlot( slot );
-			unsigned char *mem = ( unsigned char * )malloc( slabBytes );
+			SBArena_Start();
+			unsigned char *mem = ( unsigned char * )SBArena_Alloc( slabBytes );
 			if ( !mem )
 				return nullptr;
 
@@ -490,7 +786,7 @@ struct SBASlab
 				m_slabs = sl->next;
 			if ( sl->next )
 				sl->next->prevLink = sl->prevLink;
-			free( sl->base );
+			SBArena_Free( sl->base, SBASlabBytes( sl->bucket ) );
 		}
 
 		SBASlab *LinearFindSlab( unsigned char *addr )   // caller holds the lock

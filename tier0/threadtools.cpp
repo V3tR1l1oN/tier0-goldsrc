@@ -11,6 +11,7 @@
 #include "threadtools.h"
 
 #include <process.h>
+#include <intrin.h>
 
 #ifdef WIN32
 static DWORD g_ThreadMainThreadID = GetCurrentThreadId();
@@ -219,6 +220,14 @@ ThreadHandle_t CreateSimpleThread( ThreadWorkerFunction_t pfnThread, void *pvPar
 
 	DWORD threadID	= 0;
 	HANDLE hThread	= ( HANDLE )_beginthreadex( NULL, nBytesStack, SimpleThreadThreadProc, pInitData, 0, ( unsigned * )&threadID );
+
+	if ( !hThread )
+	{
+		delete pInitData;            // no thread was created; do not leak the init record
+		if ( pOutThreadId )
+			*pOutThreadId = 0;
+		return NULL;
+	}
 
 	if ( pOutThreadId )
 		*pOutThreadId = ( ThreadId_t )( uintptr_t )threadID;
@@ -517,6 +526,11 @@ void CThreadFastMutex::Lock( unsigned timeout ) const volatile
 		{
 			continue;
 		}
+
+		// Backoff: a few pause-stall cycles keep the cache line in the exclusive
+		// state without burning a syscall, then yield to the scheduler.
+		for ( int i = 0; i < 64; ++i )
+			_mm_pause();
 
 		Sleep( 0 );
 	}
