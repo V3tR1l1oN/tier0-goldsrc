@@ -94,9 +94,9 @@ exit code 0
 
 tests\test_sba_mt.exe 6000000
 contended alloc/free  size 4..2048  per-thread iters=375000
-   1 threads:    ~20 ms  ( ~50 ns/op)
-   4 threads:   ~180 ms  (~120 ns/op)
-  16 threads:  ~1800 ms  (~300 ns/op)
+   1 threads:     ~12 ms  ( ~32 ns/op)
+   4 threads:    ~18 ms  ( ~12 ns/op)
+  16 threads:    ~56 ms  (  ~9 ns/op)
 ok
 exit code 0
 ```

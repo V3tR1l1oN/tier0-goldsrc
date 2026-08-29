@@ -40,6 +40,8 @@ namespace
 	const unsigned SBA_MAGIC = 0x54414253;               // 'SBAT'
 	const unsigned SBA_NO_BUCKET = 0xFFFFFFFF;
 
+	bool g_sbaReady = false;    // flushes on thread detach must not touch a torn-down SBA
+
 	unsigned SBARound( size_t size )
 	{
 		if ( size == 0 )
@@ -89,6 +91,19 @@ namespace
 unsigned SBASlabBytes( unsigned bucket )
 	{
 		return SBASlabBytesForSlot( SBASlot( SBAPayload( bucket ) ) );
+	}
+
+	unsigned SBACapForSlot( unsigned slot )
+	{
+		// How many blocks a thread may keep in its own need-not-lock cache for
+		// one bucket: bounded by bytes (~8 KB/bucket/thread) and by the batch
+		// array size used on refill. Large slots keep a floor of 16 so a block
+		// churn (alloc/free of the same big bucket) recycles within the thread
+		// cache instead of tearing down and re-carving an 8K slab each cycle.
+		unsigned cap = 8192 / slot;
+		if ( cap < 16 )
+			cap = 16;
+		return ( cap > 192 ) ? 192 : cap;
 	}
 
 	struct SBAHeader
@@ -266,6 +281,7 @@ struct SBASlab
 		CSmallBlockAlloc()
 		{
 			InitializeCriticalSectionAndSpinCount( &m_cs, 4000 );
+			g_sbaReady = true;
 			m_slabs = nullptr;
 			for ( unsigned i = 0; i < SBA_BUCKETS; ++i )
 			{
@@ -281,6 +297,7 @@ struct SBASlab
 
 		~CSmallBlockAlloc()
 		{
+			g_sbaReady = false;
 			EnterCriticalSection( &m_cs );
 			while ( m_slabs )
 			{
@@ -338,31 +355,50 @@ struct SBASlab
 			return SBA_NO_BUCKET;
 		}
 
-		void *PopOrCarve( unsigned bucket )              // caller holds the lock
+		unsigned PopBatch( unsigned bucket, unsigned want, void **out )   // caller holds the lock
 		{
-			SBASlab *sl = m_partial[ bucket ];
-			if ( sl )
+			// Drains the bucket's free blocks (and carves fresh slabs) into the
+			// caller's array. One carve can fill the whole batch, so an alloc-only
+			// workload pays for a slab once every (capacity) blocks instead of
+			// every block.
+			unsigned got = 0;
+			unsigned slot = m_slot[ bucket ];
+
+			while ( got < want )
 			{
-				void *p = sl->freeHead;
-				sl->freeHead = *( void ** )p;
-				if ( --sl->freeCount == 0 )
-					UnlinkPartial( sl, bucket );
-				return p;
+				SBASlab *sl = m_partial[ bucket ];
+				while ( sl && sl->freeCount && got < want )
+				{
+					void *p = sl->freeHead;
+					sl->freeHead = *( void ** )p;
+					out[ got++ ] = p;
+					if ( --sl->freeCount == 0 )
+					{
+						UnlinkPartial( sl, bucket );
+						break;
+					}
+				}
+				if ( got >= want )
+					break;
+
+				sl = m_cur[ bucket ];
+				if ( !sl || sl->freePtr + slot > sl->end )
+					sl = CarveSlab( bucket );
+				if ( !sl )
+					break;
+
+				while ( sl->freePtr + slot <= sl->end && got < want )
+				{
+					unsigned char *block = sl->freePtr;
+					sl->freePtr += slot;
+					SBAHeader *h = ( SBAHeader * )block;
+					h->magic = SBA_MAGIC;
+					h->bucket = bucket;
+					out[ got++ ] = block + SBA_HEADER;
+				}
 			}
 
-			unsigned slot = m_slot[ bucket ];
-			sl = m_cur[ bucket ];
-			if ( !sl || sl->freePtr + slot > sl->end )
-				sl = CarveSlab( bucket );
-			if ( !sl )
-				return nullptr;
-
-			unsigned char *block = sl->freePtr;
-			sl->freePtr += slot;
-			SBAHeader *h = ( SBAHeader * )block;
-			h->magic = SBA_MAGIC;
-			h->bucket = bucket;
-			return block + SBA_HEADER;
+			return got;
 		}
 
 		void Push( unsigned bucket, void *p )            // caller holds the lock
@@ -424,6 +460,7 @@ struct SBASlab
 			sl->base = mem;
 			sl->end = mem + slabBytes;
 			sl->freePtr = mem + SBA_DESC_RESERVE;
+
 			if ( m_slabs )
 				m_slabs->prevLink = sl;
 			m_slabs = sl;
@@ -468,6 +505,127 @@ struct SBASlab
 	};
 
 	CSmallBlockAlloc g_SBA;
+
+	// -----------------------------------------------------------------------------
+	// Per-thread block caches (fronting the global locked SBA).
+	//
+	// Alloc pops from the thread's own cache (no lock); when the cache is empty a
+	// whole batch is grabbed from the global pool in one lock hold. Free pushes
+	// to the thread's cache; when a bucket holds more than its cap, half of it is
+	// returned to the global pool. Lock traffic drops from "every operation" to
+	// "every cap blocks", and GetSize/Free of a live SBA block need no lock at
+	// all. A block held on a thread keeps its slab alive (it is an outstanding
+	// allocation there), so slabs are never destroyed early; the destructor
+	// flushes all caches back to the global pool at thread detach.
+	// -----------------------------------------------------------------------------
+	struct TLSFreeBucket
+	{
+		void *head;          // intrusive free chain threaded through payloads
+		unsigned count;
+	};
+
+	thread_local struct SBAThreadCaches
+	{
+		TLSFreeBucket b[ SBA_BUCKETS ];
+
+		~SBAThreadCaches()
+		{
+			if ( !g_sbaReady )
+				return;
+			EnterCriticalSection( &g_SBA.m_cs );
+			for ( unsigned k = 0; k < SBA_BUCKETS; ++k )
+			{
+				TLSFreeBucket &c = b[ k ];
+				while ( c.head )
+				{
+					void *p = c.head;
+					c.head = *( void ** )p;
+					--c.count;
+					g_SBA.Push( k, p );
+				}
+			}
+			LeaveCriticalSection( &g_SBA.m_cs );
+		}
+	} g_tlCaches;
+
+	// Classify a pointer without the lock: header magic + bucket, then verify the
+	// containing page still belongs to the claimed (live) slab via the map. The
+	// map grows monotonically in practice while pages are live; a raced/destroyed
+	// slab simply fails the range check and the caller falls back to the locked
+	// path, so a genuine CRT pointer can never be mistaken for a pool block.
+	unsigned SBAFastClassify( void *p )
+	{
+		if ( ( size_t )p < 0x10000 )
+			return SBA_NO_BUCKET;
+
+		unsigned char *addr = ( unsigned char * )p;
+		SBAHeader *h = ( SBAHeader * )( addr - SBA_HEADER );
+		if ( h->magic != SBA_MAGIC || h->bucket >= SBA_BUCKETS )
+			return SBA_NO_BUCKET;
+
+		SBASlab *sl = g_SBA.m_map.FindPage( addr );
+		return ( sl && sl->bucket == h->bucket ) ? h->bucket : SBA_NO_BUCKET;
+	}
+
+	static void* AllocSBA( size_t nSize )
+	{
+		unsigned bucket = g_SBA.m_bucketOf[ nSize ];
+
+		TLSFreeBucket &c = g_tlCaches.b[ bucket ];
+		if ( c.count )
+		{
+			void *p = c.head;
+			c.head = c.count > 1 ? *( void ** )p : nullptr;
+			--c.count;
+			return p;
+		}
+
+		unsigned want = SBACapForSlot( g_SBA.m_slot[ bucket ] );
+		if ( want > 96 )
+			want = 96;
+		void *tmp[ 96 ];
+		unsigned got;
+
+		EnterCriticalSection( &g_SBA.m_cs );
+		got = g_SBA.PopBatch( bucket, want, tmp );
+		LeaveCriticalSection( &g_SBA.m_cs );
+
+		if ( !got )
+			return nullptr;
+
+		if ( got > 1 )
+		{
+			for ( unsigned i = 0; i + 1 < got; ++i )
+				*( void ** )tmp[ i ] = tmp[ i + 1 ];
+			*( void ** )tmp[ got - 1 ] = nullptr;
+		}
+		c.head = ( got > 1 ) ? tmp[ 1 ] : nullptr;
+		c.count = got - 1;
+		return tmp[ 0 ];
+	}
+
+	static void TLSFree( unsigned bucket, void *p )
+	{
+		TLSFreeBucket &c = g_tlCaches.b[ bucket ];
+		*( void ** )p = c.head;
+		c.head = p;
+
+		unsigned cap = SBACapForSlot( g_SBA.m_slot[ bucket ] );
+		if ( ++c.count > cap )
+		{
+			unsigned leave = cap / 2;
+			unsigned n = c.count - leave;
+			EnterCriticalSection( &g_SBA.m_cs );
+			while ( n-- && c.head )
+			{
+				void *q = c.head;
+				c.head = *( void ** )q;
+				--c.count;
+				g_SBA.Push( bucket, q );
+			}
+			LeaveCriticalSection( &g_SBA.m_cs );
+		}
+	}
 }
 
 // --------------------------------------------------------------------------------
@@ -543,18 +701,6 @@ IMemAlloc* g_pMemAlloc = &g_MemAlloc;
 
 static MemAllocFailHandler_t g_pfnFailHandler = nullptr;
 
-// SBA fast path: returns a pool block for nSize <= SBA_MAX, or NULL.
-static void* AllocSBA( size_t nSize )
-{
-	unsigned bucket = g_SBA.m_bucketOf[ nSize ];
-
-	EnterCriticalSection( &g_SBA.m_cs );
-	void* p = g_SBA.PopOrCarve( bucket );
-	LeaveCriticalSection( &g_SBA.m_cs );
-
-	return p;
-}
-
 void* CStdMemAlloc::Alloc_Debug( size_t nSize, const char* pFileName, int nLine, int unknown )
 {
 	UNREFERENCED_PARAMETER( pFileName );
@@ -605,66 +751,39 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 	unsigned newBucket = ( nSize <= SBA_MAX ) ? g_SBA.m_bucketOf[ nSize ] : SBA_NO_BUCKET;
 	void *p = nullptr;
 
-	EnterCriticalSection( &g_SBA.m_cs );
-	unsigned oldBucket = g_SBA.Classify( pMem );
+	// Classify without the lock when possible: same-pool realloc is the hot case.
+	unsigned oldBucket = SBAFastClassify( pMem );
+	if ( oldBucket == SBA_NO_BUCKET )
+	{
+		EnterCriticalSection( &g_SBA.m_cs );
+		oldBucket = g_SBA.Classify( pMem );
+		LeaveCriticalSection( &g_SBA.m_cs );
+	}
 	size_t oldSize = ( oldBucket != SBA_NO_BUCKET )
 		? g_SBA.m_payload[ oldBucket ]
 		: ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
 
 	if ( oldBucket == newBucket && oldBucket != SBA_NO_BUCKET )
-	{
-		LeaveCriticalSection( &g_SBA.m_cs );
 		return pMem;                     // same pool: no move, no copy
-	}
 
 	if ( oldBucket == SBA_NO_BUCKET && newBucket == SBA_NO_BUCKET )
 	{
 		// large -> large: plain CRT realloc with SEH fallback
-		LeaveCriticalSection( &g_SBA.m_cs );
-
-		void *q = nullptr;
 		__try
 		{
-			q = realloc( pMem, nSize );
+			p = realloc( pMem, nSize );
 		}
 		__except( EXCEPTION_EXECUTE_HANDLER )
 		{
-			q = nullptr;
+			p = nullptr;
 		}
 
-		if ( !q )
+		if ( !p )
 		{
-			q = malloc( nSize );
-			if ( q )
-			{
-				memcpy( q, pMem, ( oldSize < nSize ) ? oldSize : nSize );
-				__try { free( pMem ); } __except( EXCEPTION_EXECUTE_HANDLER ) {}
-			}
-		}
-
-		if ( !q && g_pfnFailHandler )
-			q = g_pfnFailHandler( nSize );
-		return q;
-	}
-
-	if ( newBucket != SBA_NO_BUCKET )
-	{
-		// move into an SBA pool: copy, then retire the old block
-		p = g_SBA.PopOrCarve( newBucket );
-		if ( p )
-			memcpy( p, pMem, ( oldSize < nSize ) ? oldSize : nSize );
-
-		if ( oldBucket != SBA_NO_BUCKET )
-		{
-			g_SBA.Push( oldBucket, pMem );
-			LeaveCriticalSection( &g_SBA.m_cs );
-		}
-		else
-		{
-			LeaveCriticalSection( &g_SBA.m_cs );
+			p = malloc( nSize );
 			if ( p )
 			{
-				// old CRT block retired outside the lock
+				memcpy( p, pMem, ( oldSize < nSize ) ? oldSize : nSize );
 				__try { free( pMem ); } __except( EXCEPTION_EXECUTE_HANDLER ) {}
 			}
 		}
@@ -674,8 +793,32 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 		return p;
 	}
 
+	if ( newBucket != SBA_NO_BUCKET )
+	{
+		// move into an SBA pool: copy, then retire the old block
+		p = AllocSBA( nSize );
+		if ( p )
+			memcpy( p, pMem, ( oldSize < nSize ) ? oldSize : nSize );
+
+		if ( oldBucket != SBA_NO_BUCKET )
+		{
+			EnterCriticalSection( &g_SBA.m_cs );
+			g_SBA.Push( oldBucket, pMem );
+			LeaveCriticalSection( &g_SBA.m_cs );
+		}
+		else
+		{
+			// old CRT block retired outside the lock
+			if ( p )
+				__try { free( pMem ); } __except( EXCEPTION_EXECUTE_HANDLER ) {}
+		}
+
+		if ( !p && g_pfnFailHandler )
+			p = g_pfnFailHandler( nSize );
+		return p;
+	}
+
 	// small -> large: move out of the SBA into the CRT heap
-	LeaveCriticalSection( &g_SBA.m_cs );
 	p = malloc( nSize );
 	if ( p )
 	{
@@ -704,7 +847,13 @@ void CStdMemAlloc::Free( void* pMem, int unknown )
 	if ( !pMem )
 		return;
 
-	unsigned bucket;
+	// Fast path: live SBA block -> the thread's own cache, no lock at all.
+	unsigned bucket = SBAFastClassify( pMem );
+	if ( bucket != SBA_NO_BUCKET )
+	{
+		TLSFree( bucket, pMem );
+		return;
+	}
 
 	EnterCriticalSection( &g_SBA.m_cs );
 	bucket = g_SBA.Classify( pMem );
@@ -747,15 +896,13 @@ size_t CStdMemAlloc::GetSize( void* pMem )
 	if ( !pMem )
 		return 0;
 
-	EnterCriticalSection( &g_SBA.m_cs );
-	unsigned bucket = g_SBA.Classify( pMem );
+	// Fast path, no lock: a live SBA block carries its bucket in the header; the
+	// page map confirms the block is still owned by a live slab. Genuine CRT
+	// pointers are never inside a live slab range, so they fall through to
+	// HeapSize below (matching the original behavior, minus the lock).
+	unsigned bucket = SBAFastClassify( pMem );
 	if ( bucket != SBA_NO_BUCKET )
-	{
-		size_t s = g_SBA.m_payload[ bucket ];       // exact SBA pool size
-		LeaveCriticalSection( &g_SBA.m_cs );
-		return s;
-	}
-	LeaveCriticalSection( &g_SBA.m_cs );
+		return g_SBA.m_payload[ bucket ];      // exact SBA pool size
 
 	// Large CRT blocks: report the real usable size via the actual CRT heap.
 #ifdef WIN32
