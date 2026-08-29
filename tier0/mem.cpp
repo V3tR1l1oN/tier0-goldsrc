@@ -130,9 +130,9 @@ namespace
 				continue;
 			}
 
-			// Commit ahead of the touch in 256 KB slices, then touch under the
+			// Commit ahead of the touch in 1 MB slices, then touch under the
 			// lock so the slice never overlaps a page handed out meanwhile.
-			size_t grow = want < ( 256u << 10 ) ? want : ( 256u << 10 );
+			size_t grow = want < ( 1u << 20 ) ? want : ( 1u << 20 );
 			size_t off = g_arena.touched;
 			if ( g_arena.commitEnd < off + grow )
 			{
@@ -153,7 +153,9 @@ namespace
 				g_arena.touched = off + grow;
 			}
 			LeaveCriticalSection( &g_arena.cs );
-			Sleep( 0 );            // never consume a whole core
+			// The thread runs at THREAD_PRIORITY_BELOW_NORMAL: Windows schedules
+			// it only when no normal-priority thread is ready, so the busy warm
+			// loop cannot delay the allocating engine thread. No Sleep needed.
 		}
 
 		return 0;
@@ -249,12 +251,26 @@ namespace
 				}
 			}
 
+			// Keep a warm cushion ahead of handout: when the engine allocates
+			// faster than the prefault thread (map/resource load bursts), raise
+			// the prefault target adaptively so warm pages keep arriving ahead
+			// of the burst (capped at the reservation).
+			if ( g_arena.touched < g_arena.handout + ( 8u << 20 ) &&
+				 g_arena.target < g_arena.reserve )
+			{
+				size_t want = g_arena.handout + ( 16u << 20 );
+				g_arena.target = want < g_arena.reserve ? want : g_arena.reserve;
+			}
+
 			if ( p )
 			{
 				size_t off = ( size_t )( p - g_arena.base );
 				if ( off + bytes > g_arena.commitEnd )
 				{
 					size_t add = off + bytes - g_arena.commitEnd;
+					add = ( add + 0xFFFFF ) & ~( size_t )0xFFFFF;   // 1 MB granularity
+					if ( g_arena.commitEnd + add > g_arena.reserve )
+						add = g_arena.reserve - g_arena.commitEnd;
 					if ( !VirtualAlloc( g_arena.base + g_arena.commitEnd, add,
 							MEM_COMMIT, PAGE_READWRITE ) )
 					{
@@ -1272,8 +1288,34 @@ void CStdMemAlloc::DumpStats()
 	}
 	LeaveCriticalSection( &g_SBA.m_cs );
 
+	if ( g_arena.base )
+	{
+		size_t recycled4 = 0;
+		size_t recycled8 = 0;
+
+		EnterCriticalSection( &g_arena.cs );
+		for ( void *q = g_arena.fl4k; q; q = *( void ** )q )
+			++recycled4;
+		for ( void *q = g_arena.fl8k; q; q = *( void ** )q )
+			++recycled8;
+		LeaveCriticalSection( &g_arena.cs );
+
+		Msg( "SBA arena: reserve=%uMB commit=%uMB handout=%uMB "
+			 "touched=%uMB target=%uMB recycled4K=%u recycled8K=%u\n",
+			( unsigned )( g_arena.reserve >> 20 ),
+			( unsigned )( g_arena.commitEnd >> 20 ),
+			( unsigned )( g_arena.handout >> 20 ),
+			( unsigned )( g_arena.touched >> 20 ),
+			( unsigned )( g_arena.target >> 20 ),
+			( unsigned )recycled4, ( unsigned )recycled8 );
+	}
+	else
+	{
+		Msg( "SBA arena: off (SBA_ARENA=0 or reservation failed)\n" );
+	}
+
 	Msg( "SBA: %u slabs, %u free blocks\n",
-		(unsigned)slabs, (unsigned)freeBlocks );
+		( unsigned )slabs, ( unsigned )freeBlocks );
 }
 
 void* CStdMemAlloc::CrtSetReportFile( int nRptType, void* hFile )

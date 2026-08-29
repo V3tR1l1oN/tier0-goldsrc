@@ -70,6 +70,9 @@ int main(int argc, char **argv)
 	size_t *gp = (size_t *)GetProcAddress(h, "g_pMemAlloc");
 	IMemAllocB *p = (IMemAllocB *)(*gp);
 
+	printf("--- arena stats before ---\n");
+	p->DumpStats();
+
 	unsigned sizes[2] = { size, size2 };
 	for (int s = 0; s < 2; ++s)
 	{
@@ -123,6 +126,9 @@ int main(int argc, char **argv)
 		for (unsigned i = 0; i < iters; ++i)
 			p->Free(keep[i], 0);
 		free(keep);
+
+		printf("--- arena stats after burst %d ---\n", s);
+		p->DumpStats();
 	}
 	printf("--- sba_diag done (t=%0.0fms) ---\n", now_msec() - t0);
 	return 0;
