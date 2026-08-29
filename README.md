@@ -149,6 +149,13 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 - **v1.3.0** — TLS-кэши аллокатора (lock-free alloc/free), слаб-арена
   512 МБ с фоновым прекешем страниц, хардненинг lock-free карты слабов
   (фикс редкого MT ACCESS_VIOLATION), фиксы threadtools и аудит UAF.
+- **v1.4.0** — точный тик-пейсинг под боевой нагрузкой (precise sleep:
+  timeBeginPeriod + QPC-спин, 100-тик = 10.02 мс avg, 0 медленных из 64),
+  честная детекция CPU с учётом affinity (12/6 вместо 12/12), benchmark,
+  CI (test_cpu + test_cpu 4), журнал крашей crash.log/.mdmp, стресс-тест
+  аллокатора, аудит-фиксы: spew-группы (дубликаты/переполнение),
+  heapchk=_HEAPOK, bounded-таймаут fast-mutex, баланс vprof Start/Stop,
+  IgnoreAssertsNearby, кольцевой scratch, закрытие хендла потока.
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
