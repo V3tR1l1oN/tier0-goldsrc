@@ -404,8 +404,8 @@ XThread alloc/free 256 :   ~30 / ~33 ns/op — 4 потока аллоцирую
 Thread create+join     :   ~102 µs под спавн (~10 000 потоков/сек)
 SBA stress 16 потоков  :   16×600×512 ≈ 5 млн alloc/free, чисто (exit 0)
 Arena alloc-all 2048   :   120 ns/op vs 1008 ns/op (SBA_ARENA=0); free 3 vs 10 мс
-Tick pacing (10 ms)    :   avg 10.02 ms (10.00..10.36), 0/64 медленных; было 15.0, 63/64
-Tick pacing (7  ms)    :   avg  7.00 ms (7.00..7.12), 0/64 медленных; было 14.6, 63/64
+Tick pacing (10 ms)    :   clean 10.02 ms / battle 10.02 ms, 0/64 медленных (было 15.0, 63/64)
+Tick pacing (7  ms)    :   clean  7.00 ms / battle  7.00 ms, 0/64 медленных (было 14.6, 63/64)
 Clock stability clean  :   max gap ~140 us; >1 us в ~0.006% отсчётов (QPC-пол)
 Clock stability noise  :   max gap ~140 us; >1 us в ~0.07% под боевой загрузкой
 313 экспортов          :   совпадают с оригиналом (dumpbin)

@@ -122,6 +122,7 @@ static void BenchRealloc(IMemAllocB *pAlloc, unsigned int iters)
 struct JitterShared
 {
 	IMemAllocB *p;
+	unsigned int size;
 	volatile bool stop;
 };
 
@@ -130,7 +131,7 @@ static unsigned __stdcall JitterNoise(void *pv)
 	JitterShared *s = (JitterShared *)pv;
 	while (!s->stop)
 	{
-		void *q = s->p->Alloc(256);
+		void *q = s->p->Alloc(s->size);
 		s->p->Free(q, 0);
 	}
 	return 0;
@@ -141,16 +142,23 @@ typedef void (__cdecl *ThreadSleepFn)(unsigned int);
 // Tick pacing: a 100-tick server sleeps 10 ms per tick. Bare ::Sleep()
 // quantizes to ~15.6 ms (tick rate collapses toward 64). Measure actual
 // sleep-to-sleep intervals for a virtual 100-tick frame in both legacy and
-// precise modes (default precise, TIER0_PRECISE_SLEEP=0 = legacy).
-static void BenchTickPacing(ThreadSleepFn pfnSleep, unsigned int ms, unsigned int ticks)
+// precise modes (default precise, TIER0_PRECISE_SLEEP=0 = legacy). noise=1
+// also runs a battle-like allocator thread so we see whether real combat load
+// (entities being spawned/updated) steals the 10 ms budget.
+static void BenchTickPacing(ThreadSleepFn pfnSleep, IMemAllocB *pAlloc,
+	CreateSimpleThreadFn fnThread, unsigned int ms, unsigned int ticks, int noise)
 {
-	LARGE_INTEGER freq;
-	QueryPerformanceFrequency(&freq);
+	JitterShared s;
+	s.p = pAlloc;
+	s.size = 2048;
+	s.stop = false;
 
-	double t0 = NowSec();
+	void *h = NULL;
+	if (noise)
+		h = fnThread(JitterNoise, &s, NULL, 0);
+
 	pfnSleep(ms);            // cancel warmup/window effects
 	pfnSleep(ms);
-	t0 = NowSec();
 
 	double minGap = 1e9, maxGap = 0.0, sum = 0.0;
 	unsigned int jitter = 0;
@@ -166,15 +174,26 @@ static void BenchTickPacing(ThreadSleepFn pfnSleep, unsigned int ms, unsigned in
 		sum += gap;
 		if (gap > (ms * 1.25e-3)) jitter++;   // >25% over target
 	}
-	printf("Tick sleep %-2u ms    : actual %.3f..%.3f ms avg %.3f ms, slow ticks(>%u%%): %u/%u\n",
-		ms, minGap * 1e3, maxGap * 1e3, sum * 1e3 / ticks, (unsigned int)(ms * 25 / 100), jitter, ticks);
+
+	if (noise)
+	{
+		s.stop = true;
+		WaitForSingleObject((HANDLE)h, INFINITE);
+		CloseHandle((HANDLE)h);
+	}
+
+	printf("Tick sleep %-2u ms    : %s actual %.3f..%.3f ms avg %.3f ms, slow ticks(>%u%%): %u/%u\n",
+		ms, noise ? "battle-t" : "clean   ",
+		minGap * 1e3, maxGap * 1e3, sum * 1e3 / ticks, (unsigned int)(ms * 25 / 100), jitter, ticks);
 }
 
-void BenchTickPacingBoth(ThreadSleepFn pfnSleep)
+void BenchTickPacingBoth(ThreadSleepFn pfnSleep, IMemAllocB *pAlloc, CreateSimpleThreadFn fnThread)
 {
-	printf("-- tick pacing (virtual 100/128-tick server frame )\n");
-	BenchTickPacing(pfnSleep, 10, 64);
-	BenchTickPacing(pfnSleep, 7, 64);
+	printf("-- tick pacing (virtual 100/128-tick server frame)\n");
+	BenchTickPacing(pfnSleep, pAlloc, fnThread, 10, 64, 0);
+	BenchTickPacing(pfnSleep, pAlloc, fnThread, 7, 64, 0);
+	BenchTickPacing(pfnSleep, pAlloc, fnThread, 10, 64, 1);
+	BenchTickPacing(pfnSleep, pAlloc, fnThread, 7, 64, 1);
 	printf("\n");
 }
 
@@ -183,6 +202,7 @@ static void BenchClockJitter(Plat_FloatTimeFn pfnFloat, IMemAllocB *pAlloc,
 {
 	JitterShared s;
 	s.p = pAlloc;
+	s.size = 256;
 	s.stop = false;
 
 	void *h = NULL;
@@ -395,7 +415,7 @@ int main()
 
 	printf("\n-- tick pacing (default = precise sleep)\n");
 	if (pfnThreadSleep)
-		BenchTickPacingBoth(pfnThreadSleep);
+		BenchTickPacingBoth(pfnThreadSleep, pAlloc, pfnThread);
 
 	printf("\n-- cross-thread churn (alloc 4thr -> free main)\n");
 	BenchCrossThreadChurn(pAlloc, pfnThread, 4, 50000, 256);
