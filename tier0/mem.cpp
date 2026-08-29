@@ -76,6 +76,21 @@ namespace
 		return ( payload + SBA_HEADER + 15 ) & ~15u;
 	}
 
+	unsigned SBASlabBytesForSlot( unsigned slot )
+	{
+		// Buckets whose slots fit fewer than two blocks per 4096-byte slab
+		// (payload >= 2016; the 2048 bucket holds exactly one block and churns a
+		// full slab per alloc/free) get a 8192-byte slab instead: same carve cost
+		// amortised over 4 blocks and ~2x lower memory waste.
+		return ( ( SBA_SLAB_SIZE - SBA_DESC_RESERVE ) / slot < 2 )
+			? SBA_SLAB_SIZE * 2 : SBA_SLAB_SIZE;
+	}
+
+unsigned SBASlabBytes( unsigned bucket )
+	{
+		return SBASlabBytesForSlot( SBASlot( SBAPayload( bucket ) ) );
+	}
+
 	struct SBAHeader
 	{
 		unsigned magic;
@@ -195,10 +210,13 @@ struct SBASlab
 		void Insert( SBASlab *s )
 		{
 			unsigned p1 = ( unsigned )( ( size_t )s->base >> 12 );
-			unsigned p2 = ( unsigned )( ( size_t )( s->base + SBA_SLAB_SIZE - 1 ) >> 12 );
-			InsertKey( s, p1, s->base );
-			if ( p2 != p1 )
-				InsertKey( s, p2, s->base );
+			unsigned pLast = ( unsigned )( ( size_t )( s->base + SBASlabBytes( s->bucket ) - 1 ) >> 12 );
+			for ( unsigned p = p1; ; ++p )
+			{
+				InsertKey( s, p, s->base );
+				if ( p == pLast )
+					break;
+			}
 		}
 
 		void Remove( SBASlab *sl, unsigned char *addr )
@@ -226,7 +244,7 @@ struct SBASlab
 			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & mask;
 			for ( Node *n = tab[ j ]; n; n = n->next )
 			{
-				if ( addr >= n->base && addr < n->base + SBA_SLAB_SIZE )
+				if ( addr >= n->base && addr < n->base + SBASlabBytes( n->sl->bucket ) )
 					return n->sl;      // shared page: the other owner holds the other range
 			}
 			return nullptr;
@@ -241,16 +259,24 @@ struct SBASlab
 		SBASlab *m_cur[ SBA_BUCKETS ];
 		SBASlab *m_partial[ SBA_BUCKETS ];   // slabs having free blocks
 		SBASlabMap m_map;
+		unsigned short m_bucketOf[ SBA_MAX + 1 ];   // size -> bucket (Alloc hot path), 0..267
+		unsigned short m_payload[ SBA_BUCKETS ];   // bucket -> block payload
+		unsigned short m_slot[ SBA_BUCKETS ];      // bucket -> block stride
 
 		CSmallBlockAlloc()
 		{
-			InitializeCriticalSection( &m_cs );
+			InitializeCriticalSectionAndSpinCount( &m_cs, 4000 );
 			m_slabs = nullptr;
 			for ( unsigned i = 0; i < SBA_BUCKETS; ++i )
 			{
 				m_cur[ i ] = nullptr;
 				m_partial[ i ] = nullptr;
+				unsigned payload = SBAPayload( i );
+				m_payload[ i ] = ( unsigned short )payload;
+				m_slot[ i ] = ( unsigned short )SBASlot( payload );
 			}
+			for ( unsigned s = 0; s <= SBA_MAX; ++s )
+				m_bucketOf[ s ] = ( unsigned short )SBABucket( SBARound( s ) );
 		}
 
 		~CSmallBlockAlloc()
@@ -324,7 +350,7 @@ struct SBASlab
 				return p;
 			}
 
-			unsigned slot = SBASlot( SBAPayload( bucket ) );
+			unsigned slot = m_slot[ bucket ];
 			sl = m_cur[ bucket ];
 			if ( !sl || sl->freePtr + slot > sl->end )
 				sl = CarveSlab( bucket );
@@ -378,12 +404,12 @@ struct SBASlab
 
 		SBASlab *CarveSlab( unsigned bucket )            // caller holds the lock
 		{
-			unsigned char *mem = ( unsigned char * )malloc( SBA_SLAB_SIZE );
-			if ( !mem )
-				return nullptr;
-
 			unsigned payload = SBAPayload( bucket );
 			unsigned slot = SBASlot( payload );
+			unsigned slabBytes = SBASlabBytesForSlot( slot );
+			unsigned char *mem = ( unsigned char * )malloc( slabBytes );
+			if ( !mem )
+				return nullptr;
 
 			SBASlab *sl = ( SBASlab * )mem;
 			sl->next = m_slabs;
@@ -392,11 +418,11 @@ struct SBASlab
 			sl->bucket = bucket;
 			sl->payload = payload;
 			sl->slot = slot;
-			sl->capacity = ( SBA_SLAB_SIZE - SBA_DESC_RESERVE ) / slot;
+			sl->capacity = ( slabBytes - SBA_DESC_RESERVE ) / slot;
 			sl->freeCount = 0;
 			sl->freeHead = nullptr;
 			sl->base = mem;
-			sl->end = mem + SBA_SLAB_SIZE;
+			sl->end = mem + slabBytes;
 			sl->freePtr = mem + SBA_DESC_RESERVE;
 			if ( m_slabs )
 				m_slabs->prevLink = sl;
@@ -412,10 +438,14 @@ struct SBASlab
 			if ( m_cur[ bucket ] == sl )
 				m_cur[ bucket ] = nullptr;
 
-			m_map.Remove( sl, sl->base );
-			unsigned char *lastA = sl->base + SBA_SLAB_SIZE - 1;
-			if ( ( ( size_t )sl->base >> 12 ) != ( ( size_t )lastA >> 12 ) )
-				m_map.Remove( sl, lastA );
+			unsigned char *base = sl->base;
+			unsigned lastPage = ( unsigned )( ( size_t )( base + SBASlabBytes( sl->bucket ) - 1 ) >> 12 );
+			for ( unsigned p = ( unsigned )( ( size_t )base >> 12 ); ; ++p )
+			{
+				m_map.Remove( sl, ( unsigned char * )( ( size_t )p << 12 ) );
+				if ( p == lastPage )
+					break;
+			}
 
 			if ( sl->prevLink )
 				sl->prevLink->next = sl->next;
@@ -516,7 +546,7 @@ static MemAllocFailHandler_t g_pfnFailHandler = nullptr;
 // SBA fast path: returns a pool block for nSize <= SBA_MAX, or NULL.
 static void* AllocSBA( size_t nSize )
 {
-	unsigned bucket = SBABucket( SBARound( nSize ) );
+	unsigned bucket = g_SBA.m_bucketOf[ nSize ];
 
 	EnterCriticalSection( &g_SBA.m_cs );
 	void* p = g_SBA.PopOrCarve( bucket );
@@ -572,13 +602,13 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 	if ( !pMem )
 		return Alloc( nSize );
 
-	unsigned newBucket = ( nSize <= SBA_MAX ) ? SBABucket( SBARound( nSize ) ) : SBA_NO_BUCKET;
+	unsigned newBucket = ( nSize <= SBA_MAX ) ? g_SBA.m_bucketOf[ nSize ] : SBA_NO_BUCKET;
 	void *p = nullptr;
 
 	EnterCriticalSection( &g_SBA.m_cs );
 	unsigned oldBucket = g_SBA.Classify( pMem );
 	size_t oldSize = ( oldBucket != SBA_NO_BUCKET )
-		? SBAPayload( oldBucket )
+		? g_SBA.m_payload[ oldBucket ]
 		: ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
 
 	if ( oldBucket == newBucket && oldBucket != SBA_NO_BUCKET )
@@ -721,7 +751,7 @@ size_t CStdMemAlloc::GetSize( void* pMem )
 	unsigned bucket = g_SBA.Classify( pMem );
 	if ( bucket != SBA_NO_BUCKET )
 	{
-		size_t s = SBAPayload( bucket );                // exact SBA pool size
+		size_t s = g_SBA.m_payload[ bucket ];       // exact SBA pool size
 		LeaveCriticalSection( &g_SBA.m_cs );
 		return s;
 	}

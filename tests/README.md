@@ -10,9 +10,11 @@
 | `sba_diag.cpp` | Диагностика SBA под нагрузкой: `sba_diag.exe iters size size2` — фазы alloc/check/free, проверка round/GetSize каждого блока, верфи анализ (`live GetSize`), общая маркировка `--- sba_diag done ---` |
 | `test_sba_stress.cpp` | Многопоточный стресс аллокатора: N потоков чурнят смешанные размеры (4..65536, включая CRT-крупные), мгновенная проверка содержимого под контенцией; `test_sba_stress.exe 16 600` ≈ 5 млн alloc/free, ожидается `--- sba stress ok ---` |
 | `test_crash.cpp` | Проверка краш-лога: `test_crash.exe heap` → должна писаться запись `Reason=HEAP_CORRUPTION`, `test_crash.exe brk` → `Reason=BREAKPOINT`; процесс падает с соответствующим EXCEPTION-кодом |
+| `test_getsize2048.cpp` | Регрессия живых крупных блоков: 2000 блоков по 2048 Б с мгновенной проверкой `GetSize==2048` и `Realloc 64->2048` с сохранением префикса и `GetSize==2048`. Валидирует адаптивные слабы 8192 Б и таблицу `bucket -> payload` |
 | `probe_malloc.cpp` | Контроль скорости «голому» CRT-аллокатору (80k×4096 alloc+write+free ≈ 92–97 ms) — бенчмарк, доказывающий, что узкое место было не в CRT-куче |
 | `test_exports.cpp` | Сверка экспортного манифеста: 313/313 имён из `tier0.def`, ординалы строго 1..313, каждый экспорт резолвится `GetProcAddress` и по имени, и по ординалу в один и тот же адрес; вызов безопасного подмножества (`Plat_FloatTime`, `Plat_MSTime`) |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime` (ns/call), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048; проверка `GetSize` (реальный размер ≥ заказанного) |
+| `test_sba_mt.cpp` | Харнесс контенции глобального лока SBA: 1/4/16 потоков × чурн 4..2048 (`test_sba_mt.exe iters`); выводит ms и ns/op на поток — помогает принимать решения о переносе локов |
 | `diag2.cpp` | Пошаговый полный поток `EnterScope` с логом в `trace*.log` (использовался при разработке) |
 | `diag3.cpp` | SEH-инструментированный прогон тех же вызовов (использовался для отладки краша построения дерева) |
 
@@ -27,6 +29,8 @@ cl /O1 /GS- /nologo tests\test_exports.cpp /Fetests\test_exports.exe /link /SUBS
 cl /O1 /GS- /nologo tests\sba_diag.cpp /Fetests\sba_diag.exe /link /SUBSYSTEM:CONSOLE
 cl /O2 /GS- /nologo tests\test_sba_stress.cpp /Fetests\test_sba_stress.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\test_crash.cpp /Fetests\test_crash.exe /link /SUBSYSTEM:CONSOLE
+cl /O1 /GS- /nologo tests\test_getsize2048.cpp /Fetests\test_getsize2048.exe /link /SUBSYSTEM:CONSOLE
+cl /O2 /GS- /nologo tests\test_sba_mt.cpp /Fetests\test_sba_mt.exe /link /SUBSYSTEM:CONSOLE
 ```
 
 Для удобства есть скрипты `build_bench.bat`, `build_sba_diag.bat`,
@@ -81,11 +85,25 @@ exit code 0
 tests\test_sba_stress.exe 16 600
 --- sba stress ok (16 threads x 600 rounds x 512 blocks) ---
 exit code 0
+
+tests\test_getsize2048.exe
+Alloc(2048) x2000: 2000/2000 GetSize==2048
+Realloc(64->2048): GetSize=2048 OK
+--- ok ---
+exit code 0
+
+tests\test_sba_mt.exe 6000000
+contended alloc/free  size 4..2048  per-thread iters=375000
+   1 threads:    ~20 ms  ( ~50 ns/op)
+   4 threads:   ~180 ms  (~120 ns/op)
+  16 threads:  ~1800 ms  (~300 ns/op)
+ok
+exit code 0
 ```
 
 Любой не-нулевой exit, краш, `live GetSize`≠`0xFFFFFFFF` или расхождение
 содержимого в стресс-тесте — признак регрессии в `tier0/mem.cpp`
-(ресайклинг/хэш-карта слабов).
+(ресайклинг/хэш-карта слабов/таблицы хот-пути/адаптивные слабы).
 
 `test_crash.exe` пишет в `crash.log` рядом с DLL:
 `Reason=HEAP_CORRUPTION` / `Reason=BREAKPOINT` с дампом регистров и стека.
