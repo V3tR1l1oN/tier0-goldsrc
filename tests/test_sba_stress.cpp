@@ -107,6 +107,79 @@ verify_done: ;
 	return 0;
 }
 
+// Cross-ownership phase: every worker thread allocates a batch and hands it to
+// the main thread, which verifies contents + GetSize and frees everything on a
+// different thread than the one that allocated it. This is the engine's "many
+// workers allocate, main thread frees" shape and it pounds the TLS-cache spill
+// paths plus slab destruction under cross-thread ownership.
+enum { HO = 512 };
+static void *g_handoff[64][HO];
+static size_t g_hcap[64][HO];
+
+static unsigned __stdcall CrossWorker(void *arg)
+{
+	unsigned tid = (unsigned)(unsigned long)arg;   // 1..g_threads
+	unsigned row = tid - 1;
+	static const size_t mix[] = { 4, 16, 96, 97, 128, 1024, 2048, 8192 };
+	for (int i = 0; i < HO; ++i)
+	{
+		size_t sz = mix[(tid + i) % 8];
+		unsigned char *b = (unsigned char *)g_pa->Alloc(sz);
+		if (!b)
+		{
+			InterlockedIncrement(&g_failures);
+			g_handoff[row][i] = NULL;
+			continue;
+		}
+		g_handoff[row][i] = b;
+		g_hcap[row][i] = (sz <= 2048) ? ((sz < 97) ? (sz + 3) & ~(size_t)3 : (sz + 7) & ~(size_t)7) : sz;
+		for (size_t k = 0; k < g_hcap[row][i]; ++k)
+			b[k] = (unsigned char)(i + (int)k + (int)tid);
+	}
+	return 0;
+}
+
+static int RunHandoffPhase(void)
+{
+	HANDLE *threads = (HANDLE *)calloc(g_threads, sizeof(HANDLE));
+	for (unsigned t = 0; t < g_threads; ++t)
+		threads[t] = (HANDLE)_beginthreadex(NULL, 0, CrossWorker, (void *)(unsigned long)(t + 1), 0, NULL);
+	for (unsigned t = 0; t < g_threads; ++t)
+	{
+		if (threads[t])
+			WaitForSingleObject(threads[t], INFINITE);
+	}
+	free(threads);
+
+	int bad = 0;
+	for (unsigned t = 0; t < g_threads; ++t)
+	{
+		for (int i = 0; i < HO; ++i)
+		{
+			unsigned char *b = (unsigned char *)g_handoff[t][i];
+			if (!b)
+				continue;
+			size_t cap = g_hcap[t][i];
+			if (g_pa->GetSize(b) < cap)
+			{
+				printf("handoff GetSize fail t=%u i=%d got=%u want>=%u\n", t + 1, i, (unsigned)g_pa->GetSize(b), (unsigned)cap);
+				bad = 1;
+			}
+			for (size_t k = 0; k < cap; ++k)
+			{
+				if (b[k] != (unsigned char)(i + (int)k + (int)(t + 1)))
+				{
+					printf("handoff content fail t=%u i=%d k=%u\n", t + 1, i, (unsigned)k);
+					bad = 1;
+					break;
+				}
+			}
+			g_pa->Free(b, 0);
+		}
+	}
+	return bad;
+}
+
 int main(int argc, char **argv)
 {
 	g_threads = (argc > 1) ? (unsigned)atoi(argv[1]) : 8;
@@ -139,11 +212,15 @@ int main(int argc, char **argv)
 	}
 	free(threads);
 
+	int handoffFail = RunHandoffPhase();
+	InterlockedExchangeAdd(&g_failures, handoffFail);
+
 	if (g_failures)
 	{
 		printf("--- %d FAILURES (threads=%u rounds=%u) ---\n", (int)g_failures, g_threads, g_rounds);
 		return 1;
 	}
-	printf("--- sba stress ok (%u threads x %u rounds x %d blocks) ---\n", g_threads, g_rounds, POOL);
+	printf("--- sba stress ok (%u threads x %u rounds x %d blocks + cross-thread handoff %d x %d) ---\n",
+		g_threads, g_rounds, POOL, g_threads, HO);
 	return 0;
 }
