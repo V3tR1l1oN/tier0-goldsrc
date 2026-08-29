@@ -90,30 +90,24 @@ bool Is64BitWindows()
 }
 
 // Plat_Alloc / Free / Realloc MUST go through g_pMemAlloc exactly like the original!
+// g_pMemAlloc is already fully thread-safe (per-thread lock-free TLS caches fronting
+// the small-block allocator), so no extra per-call mutex is needed -- the original's
+// critical section was only serializing calls because its backend was the raw CRT
+// heap. Keeping the old lock here would bottleneck every Plat_* call instead of the
+// allocator itself.
 void *Plat_Alloc( unsigned long size )
 {
-	static CThreadMutex s_PlatMutex;
-	s_PlatMutex.Lock();
-	void *p = g_pMemAlloc->Alloc( size );
-	s_PlatMutex.Unlock();
-	return p;
+	return g_pMemAlloc->Alloc( size );
 }
 
 void Plat_Free( void *pMem )
 {
-	static CThreadMutex s_PlatMutex;
-	s_PlatMutex.Lock();
 	g_pMemAlloc->Free( pMem );
-	s_PlatMutex.Unlock();
 }
 
 void *Plat_Realloc( void *pMem, unsigned long newSize )
 {
-	static CThreadMutex s_PlatMutex;
-	s_PlatMutex.Lock();
-	void *p = g_pMemAlloc->Realloc( pMem, newSize );
-	s_PlatMutex.Unlock();
-	return p;
+	return g_pMemAlloc->Realloc( pMem, newSize );
 }
 
 // Plat_PrimaryThreadID is DATA export in the original!
