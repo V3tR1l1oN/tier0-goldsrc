@@ -1,6 +1,6 @@
 // tier0 -- export manifest harness.
-// Cross-checks every export in tier0.def (313 names, ordinals 1..313):
-//   * loaded DLL exports the expected total (313) with strictly sequential
+// Cross-checks every export in tier0.def (314 names, ordinals 1..314):
+//   * loaded DLL exports the expected total (314) with strictly sequential
 //     ordinals 1..N,
 //   * every named export resolves via GetProcAddress by name AND by ordinal,
 //     and both resolve to the same address (name-export must map to its own
@@ -166,9 +166,9 @@ int main()
 	printf("export manifest: %d total (%d DATA), ordinals 1..%d\n",
 		g_exports, g_dataExports, g_exports);
 
-	if (g_exports != 313)
+	if (g_exports != 314)
 	{
-		printf("FAIL: expected 313 exports, got %d\n", g_exports);
+		printf("FAIL: expected 314 exports, got %d\n", g_exports);
 		g_fails++;
 	}
 
