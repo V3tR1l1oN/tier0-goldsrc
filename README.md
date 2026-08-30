@@ -165,7 +165,31 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   проверка поддерживаемых CPUID-листьев, affinity-aware fallback для topology,
   защита crash-handler от повторного входа и проверка читаемости памяти при
   обходе стека. Добавлены `test_threadtools` и расширен CI fallback/crash smoke.
-- **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
+- **v1.6.0** — безопасное завершение слаб-арены и fail-closed жизненный цикл
+  потоков: `SBArena_Stop()` джойнит фоновый pre-page поток *до* освобождения
+  slab-подложки (закрыт use-after-free), жизненный цикл арены — конечный
+  автомат с wake-событием, при невозможном join — намеренный leak вместо
+  разгрузки живой памяти. `CThread::Join` fail-closed на `WAIT_FAILED`,
+  `Stop()` трактует отрицательный таймаут как бесконечный, `Terminate()`
+  не убивает вызывающий поток и держит handle в собственности до `Join`/dtor,
+  `CWorkerThread::Call` при таймауте ответа завершает worker с ошибкой
+  (`TIER0_WORKER_TIMEOUT_MS`, по умолчанию 30 с). CI полностью зелёный:
+  починен regex проверки 313 экспортов, crash-smoke переведён на BREAKPOINT
+  и сброс `$LASTEXITCODE` после намеренного краша — все 12 шагов проходят.
+- **v1.6.1** — выпуск документации: в тег перенесены README-раздел v1.6.0 и
+  внутренние улучшения 37–39. Функционально DLL идентична v1.6.0 (та же
+  сборка `tier0.dll`).
+- **v1.6.2** — улучшение устойчивости (менее крупный внутренний пункт,
+  без изменений ABI, 313 экспортов): чистая пара высокоточного таймера
+  (`PreciseSleep` поднимает `timeBeginPeriod(1)`, а `Tier0ShutdownHighResTimer()`
+  на `DLL_PROCESS_DETACH` спаривает его с `timeEndPeriod(1)` — глобальное
+  разрешение 1 мс больше не «утекает» на жизнь процесса; добавлен opt-out
+  `TIER0_HIGHRES_TIMER=0`); реальная проверка кучи (`heapchk()` через
+  `HeapValidate(_get_heap_handle())` возвращает `_HEAPOK`(2) только на здоровой
+  куче и больше не маскирует повреждение; `CrtIsValidPointer` /
+  `CrtIsValidHeapPointer` честно проверяют регион/блок вместо «не-NULL»);
+  защита scratch-буфера (`MemAllocScratch` с точным учётом размеров по глубине,
+  33-е вложенное выделение возвращает `NULL`, а не молча портит учёт).
 - **v1.7.0** — полный аудит и массовые фиксы без смены ABI (314 экспортов, +`CreateInterface`):
   VEH теперь хранит хендл и снимается в `DLL_PROCESS_DETACH` (нет UAF после выгрузки),
   TOCTOU в `IsReadableMemory`/стек-воке обёрнут в SEH, усечения `DWORD`→`uintptr_t`
@@ -179,31 +203,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   torn 64-bit read, `getenv`→`GetEnvironmentVariableA`, `PreciseSleep` лимит 5мс и
   таймаут 100мс для `HighResState`, `FastMutex` copy не дублирует владельца,
   `WaitForMultipleEvents` >64→-1, `PulseEvent`→`SetEvent`, `SimpleThread` leak fix.
-- **v1.6.2** — улучшение устойчивости (менее крупный внутренний пункт,
-  без изменений ABI, 313 экспортов): чистая пара высокоточного таймера
-  (`PreciseSleep` поднимает `timeBeginPeriod(1)`, а `Tier0ShutdownHighResTimer()`
-  на `DLL_PROCESS_DETACH` спаривает его с `timeEndPeriod(1)` — глобальное
-  разрешение 1 мс больше не «утекает» на жизнь процесса; добавлен opt-out
-  `TIER0_HIGHRES_TIMER=0`); реальная проверка кучи (`heapchk()` через
-  `HeapValidate(_get_heap_handle())` возвращает `_HEAPOK`(2) только на здоровой
-  куче и больше не маскирует повреждение; `CrtIsValidPointer` /
-  `CrtIsValidHeapPointer` честно проверяют регион/блок вместо «не-NULL»);
-  защита scratch-буфера (`MemAllocScratch` с точным учётом размеров по глубине,
-  33-е вложенное выделение возвращает `NULL`, а не молча портит учёт).
-- **v1.6.1** — выпуск документации: в тег перенесены README-раздел v1.6.0 и
-  внутренние улучшения 37–39. Функционально DLL идентична v1.6.0 (та же
-  сборка `tier0.dll`).
-- **v1.6.0** — безопасное завершение слаб-арены и fail-closed жизненный цикл
-  потоков: `SBArena_Stop()` джойнит фоновый pre-page поток *до* освобождения
-  slab-подложки (закрыт use-after-free), жизненный цикл арены — конечный
-  автомат с wake-событием, при невозможном join — намеренный leak вместо
-  разгрузки живой памяти. `CThread::Join` fail-closed на `WAIT_FAILED`,
-  `Stop()` трактует отрицательный таймаут как бесконечный, `Terminate()`
-  не убивает вызывающий поток и держит handle в собственности до `Join`/dtor,
-  `CWorkerThread::Call` при таймауте ответа завершает worker с ошибкой
-  (`TIER0_WORKER_TIMEOUT_MS`, по умолчанию 30 с). CI полностью зелёный:
-  починен regex проверки 313 экспортов, crash-smoke переведён на BREAKPOINT
-  и сброс `$LASTEXITCODE` после намеренного краша — все 12 шагов проходят.
+- **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
