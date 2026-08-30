@@ -326,13 +326,76 @@ bool CValidator::BMemLeaks()
 
 CValidator& CValidator::operator=( const CValidator& other )
 {
-	if ( this != &other )
+	if ( this == &other )
+		return *this;
+
+	// Release our own records first. Simply taking over the source pointers
+	// (the original behaviour) left two CValidator objects owning one list,
+	// and the second destructor to run freed every node a second time.
+	CValObject *pObj = m_pValObjectFirst;
+
+	while ( pObj )
 	{
-		m_pValObjectFirst = other.m_pValObjectFirst;
-		m_pValObjectLast  = other.m_pValObjectLast;
-		m_pValObjectCur   = other.m_pValObjectCur;
-		m_bMemLeaks       = other.m_bMemLeaks;
+		CValObject *pNext = pObj->m_pValObjectNext;
+		free( pObj );
+		pObj = pNext;
 	}
+
+	m_pValObjectFirst	= NULL;
+	m_pValObjectLast	= NULL;
+	m_pValObjectCur		= NULL;
+
+	// Deep-copy the source list. m_pchName / m_pvObj / m_pvMem are borrowed
+	// pointers owned by whoever pushed the record, and m_pchType is an inline
+	// array, so copying the node is safe -- only the links that point back
+	// into the tree have to be re-pointed at the copies.
+	CValObject *pPrevCopy = NULL;
+
+	for ( const CValObject *pSrc = other.m_pValObjectFirst; pSrc; pSrc = pSrc->m_pValObjectNext )
+	{
+		CValObject *pCopy = ( CValObject * )malloc( sizeof( CValObject ) );
+
+		if ( !pCopy )
+			break;	// out of memory: keep the partial list, it stays self-consistent
+
+		*pCopy = *pSrc;
+
+		pCopy->m_pValObjectNext		= NULL;
+		pCopy->m_pValObjectChild	= NULL;	// never populated by Push(); do not inherit a stale link
+		pCopy->m_pValObjectParent	= NULL;
+
+		// A parent is always an earlier node of the same list, so its copy has
+		// already been made by the time we need it.
+		if ( pSrc->m_pValObjectParent )
+		{
+			const CValObject *pSrcWalk	= other.m_pValObjectFirst;
+			CValObject		 *pDstWalk	= m_pValObjectFirst;
+
+			while ( pSrcWalk && pSrcWalk != pSrc->m_pValObjectParent )
+			{
+				pSrcWalk = pSrcWalk->m_pValObjectNext;
+				pDstWalk = pDstWalk ? pDstWalk->m_pValObjectNext : NULL;
+			}
+
+			pCopy->m_pValObjectParent = pDstWalk;
+		}
+
+		if ( pPrevCopy )
+			pPrevCopy->m_pValObjectNext = pCopy;
+		else
+			m_pValObjectFirst = pCopy;
+
+		pPrevCopy		= pCopy;
+		m_pValObjectLast = pCopy;
+
+		if ( other.m_pValObjectCur == pSrc )
+			m_pValObjectCur = pCopy;
+	}
+
+	m_bMemLeaks	= other.m_bMemLeaks;
+	m_cpvOwned	= other.m_cpvOwned;
+	m_cubLeaked	= other.m_cubLeaked;
+	m_cpubLeaked = other.m_cpubLeaked;
 
 	return *this;
 }

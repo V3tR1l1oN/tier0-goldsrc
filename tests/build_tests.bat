@@ -36,7 +36,9 @@ cl /O2 /GS- /nologo "%T%\test_sba_stress.cpp" /Fe"%T%\test_sba_stress.exe" /link
 cl /O2 /GS- /nologo "%T%\bench.cpp"          /Fe"%T%\bench.exe"          /link /SUBSYSTEM:CONSOLE || goto :fail
 cl /O1 /GS- /nologo /I "%T%..\public\tier0" "%T%\test_cpu.cpp" /Fe"%T%\test_cpu.exe" /link /SUBSYSTEM:CONSOLE || goto :fail
 cl /O1 /GS- /nologo "%T%\sba_diag.cpp"      /Fe"%T%\sba_diag.exe"      /link /SUBSYSTEM:CONSOLE || goto :fail
+cl /O1 /GS- /nologo "%T%\test_regress.cpp"  /Fe"%T%\test_regress.exe"  /link /SUBSYSTEM:CONSOLE psapi.lib || goto :fail
 cl /O1 /GS- /nologo "%T%\test_crash.cpp"     /Fe"%T%\test_crash.exe"     /link /SUBSYSTEM:CONSOLE dbghelp.lib || goto :fail
+cl /O1 /GS- /nologo "%T%\test_threadtools.cpp" /Fe"%T%\test_threadtools.exe" /link /SUBSYSTEM:CONSOLE || goto :fail
 
 echo.
 echo BUILD OK: tests\.exe

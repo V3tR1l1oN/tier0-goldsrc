@@ -69,33 +69,60 @@ bool Plat_IsInDebugSession()
 static LARGE_INTEGER g_Frequency = {};
 static double g_Scale = 0.0;
 static LARGE_INTEGER g_PerfCount = {};
+static DWORD g_TickBase = 0;
+static bool g_bUseQPC = false;
+static volatile LONG g_TimerInitState = 0;
+
+static void InitPlatTimer()
+{
+	if( InterlockedCompareExchange( &g_TimerInitState, 1, 0 ) == 0 )
+	{
+		LARGE_INTEGER frequency = {};
+		LARGE_INTEGER base = {};
+		const BOOL bHaveQPC = QueryPerformanceFrequency( &frequency )
+			&& frequency.QuadPart != 0
+			&& QueryPerformanceCounter( &base );
+
+		g_TickBase = GetTickCount();
+		if( bHaveQPC )
+		{
+			g_Frequency = frequency;
+			g_Scale = 1.0 / ( double )frequency.QuadPart;
+			g_PerfCount = base;
+			g_bUseQPC = true;
+		}
+		else
+		{
+			// QueryPerformanceCounter is present on supported Windows versions,
+			// but a broken/virtualized platform must still get a monotonic-ish
+			// millisecond clock instead of dividing by an uninitialized frequency.
+			g_Frequency.QuadPart = 1000;
+			g_Scale = 1.0 / 1000.0;
+			g_PerfCount.QuadPart = 0;
+			g_bUseQPC = false;
+		}
+
+		// Publish all timer fields only after initialization is complete.
+		InterlockedExchange( &g_TimerInitState, 2 );
+	}
+	else
+	{
+		while( InterlockedCompareExchange( &g_TimerInitState, 0, 0 ) != 2 )
+			Sleep( 0 );
+	}
+}
 #endif
 
 double Plat_FloatTime()
 {
 #ifdef WIN32
+	InitPlatTimer();
+
 	LARGE_INTEGER PerformanceCount;
+	if( g_bUseQPC && QueryPerformanceCounter( &PerformanceCount ) )
+		return ( double )( PerformanceCount.QuadPart - g_PerfCount.QuadPart ) * g_Scale;
 
-	if( !g_Frequency.QuadPart )
-	{
-		// Measure/set the scale exactly once. Precomputing 1/frequency turns
-		// the per-call path into a multiply instead of an int64->double divide.
-		if( !QueryPerformanceFrequency( &g_Frequency ) || !g_Frequency.QuadPart )
-		{
-			g_Frequency.QuadPart = 1000;
-			g_Scale = 1.0 / 1000.0;		// fallback: 1 count == 1ms
-		}
-		else
-		{
-			g_Scale = 1.0 / ( double ) g_Frequency.QuadPart;
-		}
-
-		QueryPerformanceCounter( &g_PerfCount );
-	}
-
-	QueryPerformanceCounter( &PerformanceCount );
-
-	return ( double ) ( PerformanceCount.QuadPart - g_PerfCount.QuadPart ) * g_Scale;
+	return ( double )( GetTickCount() - g_TickBase ) * 0.001;
 #else
 	static int secbase = 0;
 

@@ -36,7 +36,9 @@ CThread::~CThread()
 
 		if ( GetExitCodeThread( m_hThread, &code ) && code == STILL_ACTIVE )
 		{
-			AssertMsg( !"Cannot call ~CThread on a running thread" );
+			// AssertMsg( exp, msg ) takes two arguments; passing one trips C4003
+			// in NDEBUG and is a hard error in a debug build.
+			AssertMsg( !"Cannot call ~CThread on a running thread", "" );
 
 			Stop( 0 );
 
@@ -172,15 +174,22 @@ void *MemAllocScratch( unsigned long nBytes )
 	if ( needed > s_nScratchBufMax )
 	{
 		size_t newMax = needed < 0x100000 ? 0x100000 : needed;
+
+		// Grow through a temporary. Assigning straight into s_pScratchBuf meant
+		// a failed Realloc both leaked the old buffer and left NULL behind, and
+		// the offset arithmetic at the end then handed out a bogus pointer.
+		void *pNew = s_pScratchBuf
+			? g_pMemAlloc->Realloc_Debug( s_pScratchBuf, newMax, "MemScratch", 46 )
+			: g_pMemAlloc->Alloc_Debug( newMax, "MemScratch", 51, 0 );
+
+		if ( !pNew )
+		{
+			s_ScratchMutex.Unlock();
+			return NULL;
+		}
+
+		s_pScratchBuf = pNew;
 		s_nScratchBufMax = newMax;
-		if ( !s_pScratchBuf )
-		{
-			s_pScratchBuf = g_pMemAlloc->Alloc_Debug( newMax, "MemScratch", 51, 0 );
-		}
-		else
-		{
-			s_pScratchBuf = g_pMemAlloc->Realloc_Debug( s_pScratchBuf, newMax, "MemScratch", 46 );
-		}
 	}
 
 	size_t offset = s_nScratchBufAllocated;

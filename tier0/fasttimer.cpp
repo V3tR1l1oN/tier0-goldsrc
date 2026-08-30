@@ -31,7 +31,11 @@ uint64 CalculateCPUFreq()
 
 	HANDLE hThisThread = GetCurrentThread();
 
+	// Pin to CPU 0 so the two QPC samples cannot be taken on different cores.
+	// This fails (returns 0) when the process affinity mask excludes CPU 0 --
+	// in that case there is nothing to restore later either.
 	DWORD_PTR dwThreadAffinityMask = SetThreadAffinityMask( hThisThread, 1u );
+	const bool bAffinityChanged = ( dwThreadAffinityMask != 0 );
 
 	QueryPerformanceFrequency( &Frequency );
 	const LONGLONG interval = Frequency.QuadPart >> 5;
@@ -69,7 +73,10 @@ uint64 CalculateCPUFreq()
 		endCPUTimestamp = g_ulLastCycleSample;
 	}
 
-	SetThreadAffinityMask( hThisThread, dwThreadAffinityMask );
+	// Restoring a mask of 0 would ask the scheduler for "no processor at all";
+	// it fails, but only after we have thrown the real mask away.
+	if ( bAffinityChanged )
+		SetThreadAffinityMask( hThisThread, dwThreadAffinityMask );
 
 	endCPUTimestamp -= cpuTimestamp;
 	PerformanceCount.QuadPart = ( count.QuadPart - PerformanceCount.QuadPart );

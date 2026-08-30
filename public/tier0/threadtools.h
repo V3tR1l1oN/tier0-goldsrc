@@ -225,8 +225,8 @@ public:
 	CThreadFastMutex& operator=( const CThreadFastMutex& );
 	CThreadFastMutex& operator=( CThreadFastMutex &&other );
 
-	void Lock( unsigned timeout = 0 ) const volatile;
-	void Lock( unsigned timeout = 0 ) volatile;
+	void Lock( unsigned timeout = TT_INFINITE ) const volatile;
+	void Lock( unsigned timeout = TT_INFINITE ) volatile;
 	void Unlock() const volatile;
 	void Unlock() volatile;
 

@@ -13,6 +13,8 @@
 | `test_getsize2048.cpp` | Регрессия живых крупных блоков: 2000 блоков по 2048 Б с мгновенной проверкой `GetSize==2048` и `Realloc 64->2048` с сохранением префикса и `GetSize==2048`. Плюс CRT-крупные: точный `GetSize` на 20480 и 65536, `Realloc 256->20480/65536`, переезд `20480/65536 <-> 2048` в обе стороны. Валидирует адаптивные слабы 8192 Б, таблицу `bucket -> payload` и честный размер крупных блоков |
 | `probe_malloc.cpp` | Контроль скорости «голому» CRT-аллокатору (80k×4096 alloc+write+free ≈ 92–97 ms) — бенчмарк, доказывающий, что узкое место было не в CRT-куче |
 | `test_cpu.cpp` | Контракт «движок ↔ ПК»: компилит снабжённые `tier0/cpu.cpp` + `tier0/fasttimer.cpp` и проверяет отчёт `GetCPUInformation()` — иерархию фич (SSE41≤SSE3≤SSE2, AVX≤SSE42…), топологию (физические ≤ логические), скорость в здравом диапазоне, консистентность `g_ClockSpeed/множители`; с аргументом `N` захватывает процесс на N CPU и требует `logical==N` (affinity-контракт). До фикса детект вообще падал в fallback: буфер `RelationAll` брался по пробу `RelationProcessorCore`, ядра молча считались «всеми» |
+| `test_threadtools.cpp` | ABI-регрессия `CWorkerThread` и `WaitForMultipleEvents`: асинхронный вызов → синхронный вызов, 100 повторных ответов, корректное завершение потока, отказ от пустого/null списка handles; ловит повторное использование completion event и гонку односекционного call-slot |
+| `test_regress.cpp` | Набор регрессий после ранних исправлений: повторный VProf после `Term`, unmatched `Stop`, освобождение sibling-subtree и deep-copy `CValidator`; запускается также в обычном и fallback CI-прогонах |
 | `test_exports.cpp` | Сверка экспортного манифеста: 313/313 имён из `tier0.def`, ординалы строго 1..313, каждый экспорт резолвится `GetProcAddress` и по имени, и по ординалу в один и тот же адрес; вызов безопасного подмножества (`Plat_FloatTime`, `Plat_MSTime`) |
 | `bench.cpp` | Бенчмарк внутренних хот-путей: стоимость `Plat_FloatTime`/`Plat_MSTime` (ns/call), стабильность часов (гэпы между соседними отсчётами frametime в чистом прогоне и под шумом-аллокатором), pacing тиков (`ThreadSleep(10/7)` — реальные интервалы пробуждения, чистые и под боевой загрузкой; legacy `Sleep` даёт 15.0/14.6 мс, точный сон — 10.02/7.00 мс даже под аллокаторным шумом), трип `Alloc`+`Free` по размером 4..65536, `Realloc` 64→2048, `GetSize` живых крупных блоков 8192/65536, thread create+join, кросс-поточный churn (4 потока alloc → main free); проверка `GetSize` (реальный размер ≥ заказанного) |
 | `test_sba_mt.cpp` | Харнесс контенции глобального лока SBA: 1/4/16 потоков × чурн 4..2048 (`test_sba_mt.exe iters`); выводит ms и ns/op на поток — помогает принимать решения о переносе локов |
@@ -32,6 +34,7 @@ cl /O1 /GS- /nologo tests\sba_diag.cpp /Fetests\sba_diag.exe /link /SUBSYSTEM:CO
 cl /O2 /GS- /nologo tests\test_sba_stress.cpp /Fetests\test_sba_stress.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\test_crash.cpp /Fetests\test_crash.exe /link /SUBSYSTEM:CONSOLE
 cl /O1 /GS- /nologo tests\test_getsize2048.cpp /Fetests\test_getsize2048.exe /link /SUBSYSTEM:CONSOLE
+cl /O1 /GS- /nologo tests\test_threadtools.cpp /Fetests\test_threadtools.exe /link /SUBSYSTEM:CONSOLE
 cl /O2 /GS- /nologo tests\test_sba_mt.cpp /Fetests\test_sba_mt.exe /link /SUBSYSTEM:CONSOLE
 ```
 

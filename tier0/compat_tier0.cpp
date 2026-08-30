@@ -81,6 +81,10 @@ bool g_bPMELoaded		= false;
 bool g_bPMEInitialized	= false;
 bool g_bPMEEnabled		= false;
 
-
-// Global exception flag (plain C++ global to reproduce ?g_bInException@@3_NC).
-bool g_bInException = false;
+// NOTE: there is deliberately no `g_bInException` definition here any more.
+// The flag that the export table ships ( ?g_bInException@@3_NC ) is the
+// `volatile bool` in exact_native_shims.cpp. Keeping a second, plain `bool`
+// with the same source name created a *different* symbol
+// ( ?g_bInException@@3_NA ) that nothing referenced: any future translation
+// unit declaring `extern bool g_bInException;` would silently have read and
+// written a flag unrelated to the one the exception handler sets.

@@ -140,8 +140,13 @@ bool FindSpewGroup( const tchar* pGroupName, int* pInd )
 
 			if( end < start )
 			{
-				*pInd = index;
-				break;
+				// Not found. `start` is the insertion point that keeps the array
+				// sorted (it is where the name belongs); `index` is the last
+				// probe, which is one slot too low whenever the name sorts after
+				// it. Return from here directly -- falling through to the
+				// `*pInd = 0` below would throw the insertion point away.
+				*pInd = start;
+				return false;
 			}
 		}
 	}
@@ -153,6 +158,9 @@ bool FindSpewGroup( const tchar* pGroupName, int* pInd )
 
 void SpewAndLogActivate( const tchar *pGroupName, int level, int logLevel )
 {
+	if( !pGroupName || !pGroupName[ 0 ] )
+		return;
+
 	if( *pGroupName != '*' || pGroupName[ 1 ] )
 	{
 		int index;
@@ -186,7 +194,11 @@ SpewGroup_t* pGroup;
 			}
 
 			pGroup = &s_pSpewGroups[ index ];
-			_tcscpy( pGroup->m_GroupName, pGroupName );
+
+			// Bounded copy: m_GroupName is a fixed 48-byte buffer and an
+			// over-long caller name would run off the end of the record.
+			_tcsncpy( pGroup->m_GroupName, pGroupName, ARRAYSIZE( pGroup->m_GroupName ) - 1 );
+			pGroup->m_GroupName[ ARRAYSIZE( pGroup->m_GroupName ) - 1 ] = _T( '\0' );
 			++s_GroupCount;
 		}
 
@@ -299,27 +311,34 @@ SpewRetval_t SpewMessageType( SpewType_t spewType, const tchar* pMsgFormat, va_l
 	{
 		Test_SetFailed();
 
-		iWritten = _sntprintf( pTempBuffer, ARRAYSIZE( pTempBuffer ) - 1, _T( "%s (%d) : " ), s_pFileName, s_Line );
+		iWritten = _sntprintf( pTempBuffer, ARRAYSIZE( pTempBuffer ) - 1, _T( "%s (%d) : " ),
+			s_pFileName ? s_pFileName : _T( "unknown" ), s_Line );
 
-		if( iWritten == -1 )
-		{
-			autoMutex.Unlock();
-			return SPEW_ABORT;
-		}
+		// _sntprintf reports truncation as a negative count on MSVC, but a
+		// truncated result is still NUL-terminated -- clamp and keep going.
+		if( iWritten < 0 || (size_t)iWritten >= ARRAYSIZE( pTempBuffer ) - 1 )
+			iWritten = ( int )( ARRAYSIZE( pTempBuffer ) - 1 ) - 1;
+
+		pTempBuffer[ iWritten ] = _T( '\0' );
 
 		uiLeft = ( sizeof( pTempBuffer ) - 1 ) - iWritten;
 	}
 
 	int iAppendedWritten = vsnprintf( &pTempBuffer[ iWritten ], uiLeft, pMsgFormat, args );
 
-	if( iAppendedWritten == -1 )
-	{
-		autoMutex.Unlock();
-		return SPEW_ABORT;
-	}
+	// vsnprintf is C99 on modern MSVC: on truncation it returns the length that
+	// WOULD have been written, not -1. Treating -1 as the only failure let that
+	// oversized value reach the index below and write far past the buffer.
+	// Clamp to what actually fit (the text is already NUL-terminated).
+	if( iAppendedWritten < 0 || (size_t)iAppendedWritten >= uiLeft )
+		iAppendedWritten = ( int )uiLeft - 1;
 
 	if( spewType == SPEW_ASSERT )
+	{
+		// Overwrites vsnprintf's terminator, so re-terminate after the newline.
 		pTempBuffer[ iWritten + iAppendedWritten ] = _T( '\n' );
+		pTempBuffer[ iWritten + iAppendedWritten + 1 ] = _T( '\0' );
+	}
 
 	SpewRetval_t retval = s_SpewOutputFunc( spewType, pTempBuffer );
 
@@ -614,6 +633,12 @@ bool AssertValidStringPtr( const tchar* ptr, int maxchar )
 void* Plat_SimpleLog( const tchar* file, int line )
 {
 	FILE* pFile = fopen( "simple.log", "at+" );
+
+	// fopen fails when the CWD is not writable; _ftprintf(NULL, ...) would
+	// have dereferenced a null FILE*.
+	if( !pFile )
+		return nullptr;
+
 	_ftprintf( pFile, _T( "%s:%i\n" ), file, line );
 	fclose( pFile );
 

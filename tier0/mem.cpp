@@ -153,9 +153,13 @@ namespace
 				g_arena.touched = off + grow;
 			}
 			LeaveCriticalSection( &g_arena.cs );
-			// The thread runs at THREAD_PRIORITY_BELOW_NORMAL: Windows schedules
-			// it only when no normal-priority thread is ready, so the busy warm
-			// loop cannot delay the allocating engine thread. No Sleep needed.
+
+			// If VirtualAlloc refused to commit, `grow` collapses to 0 and the
+			// loop would re-request the same slice forever, pegging a core at
+			// 100%. Back off before retrying so a low-memory condition cannot
+			// turn into a permanent busy spin.
+			if ( !grow )
+				Sleep( 50 );
 		}
 
 		return 0;
@@ -408,7 +412,10 @@ struct SBASlab
 		{
 			SBASlab *sl;
 			unsigned char *base;
+			unsigned char *end;      // slab extent, cached: the lock-free walk
+			                         // must not read it through sl (see above)
 			unsigned page;
+			unsigned bucket;         // sl->bucket, cached for the same reason
 			Node *next;
 		};
 
@@ -425,6 +432,16 @@ struct SBASlab
 		// the lock), never fault. Memory stays bounded by the live high-water
 		// mark (each generation of the table is ~2x the previous one, and the
 		// node pool peaks at the largest live slab count).
+		//
+		// CRITICAL: the *slab* is NOT covered by that guarantee. A concurrent
+		// DestroySlab() frees the slab backing while a lock-free reader may be
+		// walking a chain that still contains a node pointing at it -- so the
+		// walk must never dereference Node::sl. Slab extent and bucket are
+		// therefore cached in the node itself (see Node::end / Node::bucket).
+		// With the arena on, SBArena_Free only recycles the chunk into a free
+		// list, so a stale read returns garbage instead of faulting; with
+		// SBA_ARENA=0 the slab goes to free() and the same read is a genuine
+		// use-after-free.
 		Node ** volatile tab;
 		volatile unsigned cap;
 		volatile unsigned mask;
@@ -521,10 +538,12 @@ struct SBASlab
 			Node *n = GetNode();
 			if ( !n )
 				return;
-			n->sl = s;
-			n->base = addr;
-			n->page = page;
-			unsigned j = page & mask;
+		n->sl = s;
+		n->base = addr;
+		n->end = addr + SBASlabBytes( s->bucket );
+		n->page = page;
+		n->bucket = s->bucket;
+		unsigned j = page & mask;
 			n->next = tab[ j ];
 			tab[ j ] = n;
 			++used;
@@ -569,11 +588,40 @@ struct SBASlab
 			Node *n = ( Node * )tab[ j ];
 			for ( unsigned hops = 0; n && hops < MAX_WALK; ++hops )
 			{
-				if ( addr >= n->base && addr < n->base + SBASlabBytes( n->sl->bucket ) )
+				// Uses the cached node extent, NOT n->base + SBASlabBytes(
+				// n->sl->bucket ): a concurrent DestroySlab may already have
+				// freed the slab this node points at.
+				if ( addr >= n->base && addr < n->end )
 					return n->sl;      // shared page: the other owner holds the other range
 				n = n->next;
 			}
 			return nullptr;
+		}
+
+		// Lock-free variant for SBAFastClassify. Same walk, but it hands back
+		// the cached bucket and slab base instead of the SBASlab *, so the
+		// caller can finish classifying without dereferencing slab memory at
+		// all. Nodes are pooled and never returned to the OS, so reading node
+		// fields during a raced walk is safe -- it can only MISS (the caller
+		// then retries under the lock), never fault.
+		unsigned FindBucket( unsigned char *addr, unsigned char **pSlabBase )
+		{
+			unsigned m = mask;
+			if ( !m )
+				return SBA_NO_BUCKET;
+
+			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & m;
+			Node *n = ( Node * )tab[ j ];
+			for ( unsigned hops = 0; n && hops < MAX_WALK; ++hops )
+			{
+				if ( addr >= n->base && addr < n->end )
+				{
+					*pSlabBase = n->base;
+					return n->bucket;
+				}
+				n = n->next;
+			}
+			return SBA_NO_BUCKET;
 		}
 	};
 
@@ -860,23 +908,54 @@ struct SBASlab
 		}
 	} g_tlCaches;
 
-	// Classify a pointer without the lock: header magic + bucket, then verify the
-	// containing page still belongs to the claimed (live) slab via the map. The
-	// map grows monotonically in practice while pages are live; a raced/destroyed
-	// slab simply fails the range check and the caller falls back to the locked
-	// path, so a genuine CRT pointer can never be mistaken for a pool block.
+	// Classify a pointer without the lock. Resolves the address through the page
+	// map first, validates it against the containing slab, and only then reads
+	// the block header. A raced/destroyed slab simply fails the lookup and the
+	// caller falls back to the locked path, so a genuine CRT pointer can never
+	// be mistaken for a pool block.
 	unsigned SBAFastClassify( void *p )
 	{
-		if ( ( size_t )p < 0x10000 )
-			return SBA_NO_BUCKET;
-
 		unsigned char *addr = ( unsigned char * )p;
-		SBAHeader *h = ( SBAHeader * )( addr - SBA_HEADER );
-		if ( h->magic != SBA_MAGIC || h->bucket >= SBA_BUCKETS )
+		if ( !addr )
 			return SBA_NO_BUCKET;
 
-		SBASlab *sl = g_SBA.m_map.FindPage( addr );
-		return ( sl && sl->bucket == h->bucket ) ? h->bucket : SBA_NO_BUCKET;
+		// Validate BEFORE dereferencing anything derived from the pointer.
+		// Free()/Realloc()/GetSize() are handed arbitrary pointers -- CRT
+		// blocks, static data, sometimes junk -- and the block header sits
+		// immediately BELOW the payload, so reading it first can fault on an
+		// address that is not mapped at all.
+		//
+		// The page map is the right first step: it never touches the caller's
+		// pointer (hashes the page number, masks into a bounded table, walks a
+		// bounded chain of long-lived nodes, range-checks). It therefore proves
+		// "this address is inside a slab known to the map" before we look at any
+		// header, and it is safe for any bit pattern.
+		//
+		// NOTE: the arena range is deliberately NOT used as a pre-filter here.
+		// The arena is only a *slab backing source*; when it is disabled
+		// (SBA_ARENA=0) or the reservation fails, slabs come from malloc() and
+		// live pool blocks sit on the CRT heap, entirely outside the arena.
+		// Rejecting them would make Free() hand a pool block to free() and
+		// corrupt the heap.
+		//
+		// A slab that was never indexed (map growth OOM) simply is not found;
+		// the caller retries under the lock and LinearClassify covers it. That
+		// is a miss, never a misclassification.
+		unsigned char *slabBase = nullptr;
+		const unsigned bucket = g_SBA.m_map.FindBucket( addr, &slabBase );
+		if ( bucket == SBA_NO_BUCKET )
+			return SBA_NO_BUCKET;
+
+		// Inside a live slab, but still within the descriptor/guard area:
+		// that is not a block payload, so there is no header behind it.
+		if ( ( size_t )( addr - slabBase ) < SBA_HEADER + SBA_DESC_RESERVE )
+			return SBA_NO_BUCKET;
+
+		SBAHeader *h = ( SBAHeader * )( addr - SBA_HEADER );
+		if ( h->magic != SBA_MAGIC || h->bucket != bucket )
+			return SBA_NO_BUCKET;   // caller retries under the lock
+
+		return h->bucket;
 	}
 
 	static void* AllocSBA( size_t nSize )
@@ -1071,9 +1150,19 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 		oldBucket = g_SBA.Classify( pMem );
 		LeaveCriticalSection( &g_SBA.m_cs );
 	}
-	size_t oldSize = ( oldBucket != SBA_NO_BUCKET )
-		? g_SBA.m_payload[ oldBucket ]
-		: ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
+	size_t oldSize;
+
+	if ( oldBucket != SBA_NO_BUCKET )
+	{
+		oldSize = g_SBA.m_payload[ oldBucket ];
+	}
+	else
+	{
+		// HeapSize reports (SIZE_T)-1 for a pointer it does not own. Left
+		// unchecked that becomes the copy length below and reads past the block.
+		const size_t hs = ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
+		oldSize = ( hs == ( size_t )-1 ) ? 0 : hs;
+	}
 
 	if ( oldBucket == newBucket && oldBucket != SBA_NO_BUCKET )
 		return pMem;                     // same pool: no move, no copy
@@ -1114,9 +1203,16 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 
 		if ( oldBucket != SBA_NO_BUCKET )
 		{
-			EnterCriticalSection( &g_SBA.m_cs );
-			g_SBA.Push( oldBucket, pMem );
-			LeaveCriticalSection( &g_SBA.m_cs );
+			// Only retire the old block once the replacement exists. Releasing it
+			// unconditionally meant a failed allocation left the caller holding a
+			// block that was already on the free list -- data loss plus a double
+			// free the next time the caller frees or reallocs it.
+			if ( p )
+			{
+				EnterCriticalSection( &g_SBA.m_cs );
+				g_SBA.Push( oldBucket, pMem );
+				LeaveCriticalSection( &g_SBA.m_cs );
+			}
 		}
 		else
 		{
@@ -1218,7 +1314,13 @@ size_t CStdMemAlloc::GetSize( void* pMem )
 
 	// Large CRT blocks: report the real usable size via the actual CRT heap.
 #ifdef WIN32
-	return ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
+	// HeapSize reports (SIZE_T)-1 for a pointer it does not own -- including
+	// memory from another module's heap, a debug heap with an unknown block
+	// type, or plain junk. Callers do arithmetic with GetSize() (copy
+	// lengths, loop bounds), so a bogus SIZE_MAX is far worse than a
+	// conservative 0. Same guard as Realloc().
+	const size_t hs = ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
+	return ( hs == ( size_t )-1 ) ? 0 : hs;
 #else
 	return 0;
 #endif

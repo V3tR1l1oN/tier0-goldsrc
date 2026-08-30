@@ -114,8 +114,20 @@ CVProfNode::~CVProfNode()
 	free( m_pszName );
 	m_pszName = NULL;
 
-	delete m_pChild;
+	// The old version did `delete m_pChild`, which only reached the FIRST child:
+	// that child's own destructor again followed only its first child, so every
+	// sibling below the top level leaked (a Root -> A -> B tree lost B and all of
+	// B's descendants). Walk the child list explicitly instead.
+	CVProfNode *pChild = m_pChild;
 	m_pChild = NULL;
+
+	while ( pChild )
+	{
+		CVProfNode *pNext = pChild->m_pSibling;
+		pChild->m_pSibling = NULL;      // detach: we own the walk from here
+		delete pChild;                  // recurses into that child's own subtree
+		pChild = pNext;
+	}
 }
 
 CVProfNode& CVProfNode::operator=( const CVProfNode& other )
@@ -123,10 +135,27 @@ CVProfNode& CVProfNode::operator=( const CVProfNode& other )
 	if ( this == &other )
 		return *this;
 
-	m_pszName			= other.m_pszName;
+	// ~CVProfNode frees m_pszName and deletes m_pChild, so aliasing either one
+	// from `other` turned the assignment into a guaranteed double free once both
+	// nodes went away. Take an independent copy of the name and do not adopt the
+	// source's subtree -- a copy cannot own it. m_pParent / m_pSibling are
+	// non-owning (the destructor never frees them) and are copied as before.
+	tchar *pszCopy = NULL;
+
+	if ( other.m_pszName )
+	{
+		const size_t nBytes = ( _tcslen( other.m_pszName ) + 1 ) * sizeof( tchar );
+		pszCopy = ( tchar * )malloc( nBytes );
+
+		if ( pszCopy )
+			memcpy( pszCopy, other.m_pszName, nBytes );
+	}
+
+	free( m_pszName );
+	m_pszName			= pszCopy;
 	m_pvOrigNameAddress	= other.m_pvOrigNameAddress;
 	m_pParent			= other.m_pParent;
-	m_pChild			= other.m_pChild;
+	m_pChild			= NULL;
 	m_pSibling			= other.m_pSibling;
 	m_Depth				= other.m_Depth;
 	m_DetailLevel		= other.m_DetailLevel;
@@ -440,8 +469,12 @@ void CVProfile::Term()
 		m_Root.m_pChild = NULL;
 	}
 
+	// m_pCurNodeCache must go back to the root too: leaving it on a node that
+	// was just freed turns the next EnterScope() into a use-after-free.
 	m_pRoot = &m_Root;
+	m_pCurNodeCache = &m_Root;
 	m_fAtRoot = true;
+	m_Depth = 0;
 }
 
 void CVProfile::FreeNodes_R( CVProfNode *node )
@@ -475,13 +508,16 @@ void CVProfile::Start()
 
 void CVProfile::Stop()
 {
+	// An unmatched Stop() used to decrement past zero AND still run
+	// ExitScope(), driving m_nRecursions negative and folding a bogus delta into
+	// the root's frame time. Clamp instead: never exit the root twice.
+	if ( m_Enabled == 0 )
+		return;
+
 	--m_Enabled;
 
-	if ( m_Enabled <= 0 )
-	{
-		m_Enabled = 0;
+	if ( m_Enabled == 0 )
 		m_Root.ExitScope();
-	}
 }
 
 bool CVProfile::IsEnabled() const { return m_Enabled > 0; }
@@ -951,6 +987,11 @@ void CVProfile::DumpNodes( CVProfNode *pStartNode, int indentingLevel, bool bAve
 
 	if ( bAverageAndUpdateMySum && dTotalTime > 0.0f )
 		totalTimeSec /= dTotalTime;
+
+	// Re-arm at the top of every report: a never-reset static meant only the
+	// first OutputReport() in the process ever printed the column headings.
+	if ( indentingLevel == 0 )
+		s_bDumpedHeadings = false;
 
 	if ( !s_bDumpedHeadings )
 	{

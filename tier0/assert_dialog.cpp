@@ -25,7 +25,11 @@ static CAssertDisable* CreateNewAssertDisable( const tchar* pFilename )
 {
 	auto pAssertDisable = new CAssertDisable;
 
-	_tcsncpy( pAssertDisable->m_Filename, pFilename, sizeof( pAssertDisable->m_Filename ) - 1 );
+	// g_Info.m_pFilename is only set once an assert has actually been shown;
+	// before that it is NULL and _tcsncpy would fault.
+	const tchar *pszFile = pFilename ? pFilename : _T( "" );
+
+	_tcsncpy( pAssertDisable->m_Filename, pszFile, sizeof( pAssertDisable->m_Filename ) - 1 );
 	pAssertDisable->m_Filename[ sizeof( pAssertDisable->m_Filename ) - 1 ] = _T( '\0' );
 
 	pAssertDisable->m_LineMin = -1;
@@ -70,7 +74,9 @@ PLATFORM_INTERFACE bool DoNewAssertDialog( const tchar *pFilename, int line, con
 						{
 							const bool bCheckRange = pNext->m_LineMin != -1 || pNext->m_LineMax != -1;
 
-							if( line >= pNext->m_LineMin && line <= pNext->m_LineMax || !bCheckRange )
+							// Parenthesised: && binds tighter than ||, so the
+						// intent is "inside the window, or no window set".
+						if( ( line >= pNext->m_LineMin && line <= pNext->m_LineMax ) || !bCheckRange )
 							{
 								if( pNext->m_nIgnoreTimes <= 0 )
 									return false;

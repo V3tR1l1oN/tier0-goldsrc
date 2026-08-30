@@ -53,26 +53,48 @@ PLATFORM_INTERFACE void WriteMiniDump()
 	g_bWritingMiniDump = false;
 }
 
-void SETranslator( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pExceptionInfo )
+// Runs inside the SEH filter below. GetExceptionInformation() is only valid
+// there, so this cannot be turned into an ordinary call in the handler body.
+static LONG MiniDumpFilter( struct _EXCEPTION_POINTERS *pExceptionInfo )
 {
-	g_MiniDumpFn( uExceptionCode, pExceptionInfo );
+	if ( pExceptionInfo && pExceptionInfo->ExceptionRecord )
+		g_MiniDumpFn( pExceptionInfo->ExceptionRecord->ExceptionCode, pExceptionInfo );
+
+	// Same contract the old _set_se_translator() hook had: it wrote the dump
+	// and returned instead of rethrowing, so execution resumed afterwards.
+	return EXCEPTION_EXECUTE_HANDLER;
 }
 
 PLATFORM_INTERFACE void CatchAndWriteMiniDump( FnWMain pfn, int argc, tchar *argv[] )
 {
+	const DWORD dwPrevThreadId = g_dwMiniDumpThreadId;
+
+	g_dwMiniDumpThreadId = GetCurrentThreadId();
+
 	if ( IsDebuggerPresent() )
 	{
-		g_dwMiniDumpThreadId = GetCurrentThreadId();
+		// A debugger stops on the fault anyway; dumping from here would just
+		// fight with it.
 		pfn( argc, argv );
-		g_dwMiniDumpThreadId = 0;
 	}
 	else
 	{
-		g_dwMiniDumpThreadId = GetCurrentThreadId();
-		_set_se_translator( &SETranslator );
-		pfn( argc, argv );
-		g_dwMiniDumpThreadId = 0;
+		// NOTE: this used to install _set_se_translator(), but that only turns
+		// structured exceptions into C++ exceptions when the module is built
+		// with /EHa (warning C4535). This build uses /EHsc, so the translator
+		// would never have fired for a hardware fault and no dump was ever
+		// written. A real SEH frame works independently of the C++ exception
+		// model and needs no translator.
+		__try
+		{
+			pfn( argc, argv );
+		}
+		__except ( MiniDumpFilter( GetExceptionInformation() ) )
+		{
+		}
 	}
+
+	g_dwMiniDumpThreadId = dwPrevThreadId;
 }
 
 bool BGetMiniDumpLock()
@@ -149,7 +171,7 @@ void MiniDumpWriter( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pE
 
 			char FileName[ MAX_PATH ];
 
-			_snprintf(
+			const int nWritten = _snprintf(
 				FileName,
 				sizeof( FileName ),
 				"%s_%s_%d%.2d%.2d%.2d%.2d%.2d_%d.mdmp",
@@ -162,6 +184,15 @@ void MiniDumpWriter( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pE
 				v7->tm_min,
 				v7->tm_sec,
 				g_MiniDumpCount );
+
+			// A truncated _snprintf leaves the buffer unterminated; CreateFileA
+			// would then read past it. Force a terminator and bail out.
+			if ( nWritten < 0 || (size_t)nWritten >= sizeof( FileName ) )
+			{
+				FreeLibrary( hDbgHelp );
+				MiniDumpUnlock();
+				return;
+			}
 
 			HANDLE hFile = CreateFileA( FileName, GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
 
@@ -183,8 +214,13 @@ void MiniDumpWriter( unsigned int uExceptionCode, struct _EXCEPTION_POINTERS *pE
 			{
 				char szRenamed[ MAX_PATH ];
 
-				_snprintf( szRenamed, sizeof( szRenamed ), "(failed)%s", FileName );
-				rename( FileName, szRenamed );
+				// "(failed)" needs 8 more bytes than the name itself; if it does
+				// not fit, leave the file under its original name rather than
+				// producing an unterminated path.
+				const int nRenamed = _snprintf( szRenamed, sizeof( szRenamed ), "(failed)%s", FileName );
+
+				if ( nRenamed > 0 && (size_t)nRenamed < sizeof( szRenamed ) )
+					rename( FileName, szRenamed );
 			}
 
 			CallFlushLogFunc();

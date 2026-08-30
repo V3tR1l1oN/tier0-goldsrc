@@ -30,17 +30,30 @@ int64 ThreadInterlockedEmu_CompareExchange64( int64 volatile *pDest, int64 value
 #if defined( _M_IX86 )
 	unsigned long *pd	= (unsigned long *)pDest;
 	unsigned long *pv	= (unsigned long *)&value;
+	unsigned long *pc	= (unsigned long *)&comperand;
 	unsigned long retLo, retHi;
 
+	// cmpxchg8b [esi] compares EDX:EAX against the destination and, on a
+	// match, stores ECX:EBX into it. BOTH halves of the store pair must come
+	// from `value` and BOTH halves of the compare pair from `comperand`.
+	// Loading only EAX/EDX from the destination (instead of from `comperand`)
+	// made every CAS "match", and leaving ECX/EBX uninitialised stored
+	// whatever those registers happened to hold -- silently trashing the
+	// destination and breaking every helper layered on top of this one.
 	__asm
 	{
 		push	edi
 		push	ebx
 
 		mov		esi, pd
-		mov		eax, [esi]
-		mov		edx, [esi+4]
+
 		mov		edi, pv
+		mov		ebx, [edi]      // low  half of the value to store
+		mov		ecx, [edi+4]    // high half of the value to store
+
+		mov		edi, pc
+		mov		eax, [edi]      // low  half of the comparand
+		mov		edx, [edi+4]    // high half of the comparand
 
 		lock	cmpxchg8b qword ptr [esi]
 
@@ -105,33 +118,38 @@ int64 ThreadInterlockedEmu_ExchangeAdd64( volatile int64 *pDest, int64 value )
 
 bool BPreciseSleepEnabled()
 {
-	static int s_mode = -1;
-	if ( s_mode < 0 )
+	// Environment lookup is lazy, but this function is commonly called from
+	// several engine threads during startup. Publish the result atomically so
+	// no caller observes a partially initialized mode.
+	static volatile LONG s_mode = -1;
+	LONG mode = InterlockedCompareExchange( &s_mode, -1, -1 );
+	if( mode == -1 )
 	{
-		const char *psz = getenv( "TIER0_PRECISE_SLEEP" );
-		s_mode = ( psz && psz[ 0 ] == '0' ) ? 0 : 1;
+		if( InterlockedCompareExchange( &s_mode, -2, -1 ) == -1 )
+		{
+			const char *psz = getenv( "TIER0_PRECISE_SLEEP" );
+			InterlockedExchange( &s_mode, ( psz && psz[ 0 ] == '0' ) ? 0 : 1 );
+		}
+		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
 	}
-	return s_mode != 0;
+	while( mode == -2 )
+	{
+		Sleep( 0 );
+		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
+	}
+	return mode != 0;
 }
 
-extern "C" unsigned int __stdcall timeBeginPeriod( unsigned int uPeriod );
+// timeBeginPeriod() comes from the SDK header (timeapi.h). It used to be
+// re-declared here without dllimport, which made every inclusion of
+// <windows.h> report C4273 "inconsistent dll linkage".
 
 static double SlpNow()
 {
-	static LARGE_INTEGER s_Frequency = {};
-	static LARGE_INTEGER s_Base = {};
-	static bool s_bInit = false;
-
-	if ( !s_bInit )
-	{
-		QueryPerformanceFrequency( &s_Frequency );
-		QueryPerformanceCounter( &s_Base );
-		s_bInit = true;
-	}
-
-	LARGE_INTEGER c;
-	QueryPerformanceCounter( &c );
-	return ( double )( c.QuadPart - s_Base.QuadPart ) / ( double )s_Frequency.QuadPart;
+	// Reuse the process-wide, once-initialized timer. The previous local
+	// frequency/base pair was initialized with a plain bool, so concurrent
+	// PreciseSleep callers could divide by zero or observe a half-written base.
+	return Plat_FloatTime();
 }
 
 void PreciseSleep( unsigned duration )
@@ -160,9 +178,17 @@ void PreciseSleep( unsigned duration )
 		return;
 	}
 
-	static bool s_bHighRes = false;
-	if ( !s_bHighRes )
-		s_bHighRes = ( timeBeginPeriod( 1 ) == 0 );
+	static volatile LONG s_HighResState = 0;
+	if( InterlockedCompareExchange( &s_HighResState, 1, 0 ) == 0 )
+	{
+		const LONG state = ( timeBeginPeriod( 1 ) == 0 ) ? 2 : 3;
+		InterlockedExchange( &s_HighResState, state );
+	}
+	else
+	{
+		while( InterlockedCompareExchange( &s_HighResState, 0, 0 ) == 1 )
+			Sleep( 0 );
+	}
 
 	const double target = ( double )duration / 1000.0;
 	const double tStart = SlpNow();
@@ -255,25 +281,31 @@ int WaitForMultipleEvents( int nEvents, const void **pHandles, bool bWaitAll, un
 	// Original (10009B40): capped at MAXIMUM_WAIT_OBJECTS, each entry is a POINTER TO a
 	// HANDLE (dereferenced into a local array), returns the raw WaitForMultipleObjects
 	// result, or -1 for FAILED / TIMEOUT / WAIT_ABANDONED_0+N.
+	if( nEvents <= 0 || pHandles == NULL )
+		return -1;
+
 	int count = MAXIMUM_WAIT_OBJECTS;
 
 	if ( nEvents < MAXIMUM_WAIT_OBJECTS )
 		count = nEvents;
 
-	if ( count < 0 )
-		count = 0;
-
 	HANDLE handles[ MAXIMUM_WAIT_OBJECTS ];
 
 	for ( int i = 0; i < count; ++ i )
+	{
+		if( pHandles[ i ] == NULL || *( const HANDLE * )pHandles[ i ] == NULL )
+			return -1;
 		handles[ i ] = *( const HANDLE * )pHandles[ i ];
+	}
 
 	DWORD dwResult = WaitForMultipleObjects( ( DWORD )count, handles, bWaitAll, ( DWORD )timeout );
 
 	if ( dwResult == WAIT_FAILED || dwResult == WAIT_TIMEOUT )
 		return -1;
 
-	if ( dwResult >= WAIT_ABANDONED_0 && dwResult <= WAIT_ABANDONED_0 + ( DWORD )count )
+	// Valid abandoned range is [WAIT_ABANDONED_0, WAIT_ABANDONED_0 + count - 1];
+	// `<=` would also swallow the first index beyond it.
+	if ( dwResult >= WAIT_ABANDONED_0 && dwResult < WAIT_ABANDONED_0 + ( DWORD )count )
 		return -1;
 
 	return ( int )dwResult;
@@ -779,7 +811,7 @@ bool CThread::Join( unsigned timeout )
 
 	if ( dwWait == WAIT_FAILED )
 	{
-		AssertMsg( !"\"CThread::Join WAIT_FAILED\"" );
+		AssertMsg( !"\"CThread::Join WAIT_FAILED\"", "" );
 		return true;
 	}
 
@@ -894,29 +926,37 @@ unsigned __stdcall CThread::ThreadProc( void * pv )
 {
 	ThreadInit_t *pData = static_cast<ThreadInit_t *>( pv );
 
-	g_pCurThread = pData->pThread;
+	// `pData` points at a ThreadInit_t living on CThread::Start()'s stack. The
+	// init-complete event releases Start(), which then returns and destroys that
+	// frame -- so nothing may touch pData after the event is signalled. Cache
+	// everything needed first and use only the cached copy afterwards.
+	CThread *pThread = pData->pThread;
+
+	g_pCurThread = pThread;
 
 	if ( pData->pfInitSuccess )
 		*pData->pfInitSuccess = false;
 
-	const bool bInitSuccess = pData->pThread->Init();
+	const bool bInitSuccess = pThread->Init();
 
 	if ( pData->pfInitSuccess )
 		*pData->pfInitSuccess = bInitSuccess;
 
 	pData->pInitCompleteEvent->Set();
 
+	// ---- pData is off limits from here on ----
+
 	unsigned result = 0;
 
 	if ( bInitSuccess )
 	{
-		result = pData->pThread->Run();
+		result = pThread->Run();
 
-		pData->pThread->OnExit();
+		pThread->OnExit();
 
 		g_pCurThread = ( CThread * )NULL;
 
-		pData->pThread->m_threadId = 0;
+		pThread->m_threadId = 0;
 	}
 
 	return result;
@@ -966,13 +1006,22 @@ int CWorkerThread::Call( unsigned flags, unsigned callParam, bool fWaitForReply,
 	if ( !IsAlive() )
 		return -1;
 
-	// Single-slot queue: reject a second call while the first is being serviced.
-	if ( m_Call.m_flags & WT_PENDING )
+	// Single-slot queue: reserve the slot atomically before publishing the
+	// payload. The previous read-then-write sequence allowed two callers to
+	// overwrite m_Call, and WaitForCall() cleared WT_PENDING before the worker
+	// had produced its reply.
+	volatile LONG *pFlags = ( volatile LONG * )&m_Call.m_flags;
+	const LONG scheduledFlags = ( LONG )( flags & ~WT_PENDING ) | WT_SCHEDULED;
+	if( InterlockedCompareExchange( pFlags, scheduledFlags, 0 ) != 0 )
 		return -1;
 
-	m_Call.m_flags = ( flags & ~WT_PENDING ) | WT_PENDING;
 	m_Call.m_param = callParam;
+	InterlockedExchange( pFlags, ( LONG )( flags & ~WT_PENDING ) | WT_PENDING );
 
+	// An asynchronous call may leave the auto-reset completion event signaled.
+	// Clear that stale signal before publishing the next request, otherwise a
+	// later synchronous call can return before its own worker reply arrives.
+	m_EventComplete.Reset();
 	m_EventSend.Set();
 
 	if ( fWaitForReply )
@@ -1002,7 +1051,9 @@ bool CWorkerThread::PeekCall( unsigned *pParam )
 		if ( pParam )
 			*pParam = m_Call.m_param;
 
-		m_Call.m_flags &= ~WT_PENDING;
+		// Keep WT_PENDING set until Reply(). The single slot is still occupied
+		// while the worker processes this request; clearing it here lets a new
+		// caller overwrite m_Call before the reply is stored.
 		return true;
 	}
 
@@ -1019,7 +1070,9 @@ bool CWorkerThread::WaitForCall( unsigned dwTimeout, unsigned *pResult )
 		if ( pResult )
 			*pResult = m_Call.m_param;
 
-		m_Call.m_flags &= ~WT_PENDING;
+		// The request remains pending until Reply() publishes the result.
+		// This prevents a second producer from reusing the one-slot queue while
+		// the worker is still processing the current request.
 		return true;
 	}
 
@@ -1039,7 +1092,8 @@ void CWorkerThread::Reply( unsigned result )
 	// Store the reply payload where the caller can pick it up, then release
 	// the waiters. The event handle re-arms on the next Send.
 	m_Call.m_param = result;
-	m_Call.m_flags &= ~WT_PENDING;
+	InterlockedAnd( ( volatile LONG * )&m_Call.m_flags,
+		~( LONG )( WT_PENDING | WT_SCHEDULED ) );
 
 	m_EventComplete.Set();
 }
@@ -1050,7 +1104,7 @@ bool CWorkerThread::WaitForReply( unsigned timeout )
 
 	if ( waitResult != WAIT_OBJECT_0 )
 	{
-		AssertMsg2( !"Timed out waiting for reply", "" );
+		AssertMsg2( !"Timed out waiting for reply", "", "", "" );
 	}
 
 	return waitResult == WAIT_OBJECT_0;

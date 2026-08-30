@@ -27,10 +27,16 @@ void ForceDefaultConstructorClosuresEmission()
 }
 
 // 3. CThreadFastMutex move / cv methods
+// A move has to leave the source empty: copying the ownership word without
+// clearing it made the moved-from mutex report GetOwnerId() == the old owner
+// and reject every TryLock(), while two objects claimed the same lock.
 CThreadFastMutex::CThreadFastMutex( CThreadFastMutex &&other )
 {
 	m_nOwnership = other.m_nOwnership;
-	m_nCount = other.m_nCount;
+	m_nCount	 = other.m_nCount;
+
+	other.m_nOwnership	= 0;
+	other.m_nCount		= 0;
 }
 
 CThreadFastMutex& CThreadFastMutex::operator=( CThreadFastMutex &&other )
@@ -38,14 +44,22 @@ CThreadFastMutex& CThreadFastMutex::operator=( CThreadFastMutex &&other )
 	if ( this != &other )
 	{
 		m_nOwnership = other.m_nOwnership;
-		m_nCount = other.m_nCount;
+		m_nCount	 = other.m_nCount;
+
+		other.m_nOwnership	= 0;
+		other.m_nCount		= 0;
 	}
 	return *this;
 }
 
+// NOTE: the forwarding overloads below must cast to `const volatile`.
+// Casting to a plain (non-volatile) pointer made overload resolution pick the
+// `volatile` overload again -- the shim called itself and blew the stack
+// (warning C4717). Only the `const volatile` members hold the real
+// implementation, so that is where the call has to land.
 void CThreadFastMutex::Lock( unsigned timeout ) volatile
 {
-	const_cast<CThreadFastMutex *>( (CThreadFastMutex *)this )->Lock( timeout );
+	const_cast<const volatile CThreadFastMutex *>( this )->Lock( timeout );
 }
 
 bool CThreadFastMutex::TryLock() volatile
@@ -60,7 +74,7 @@ bool CThreadFastMutex::TryLock() const volatile
 
 void CThreadFastMutex::Unlock() volatile
 {
-	const_cast<CThreadFastMutex *>( (CThreadFastMutex *)this )->Unlock();
+	const_cast<const volatile CThreadFastMutex *>( this )->Unlock();
 }
 
 void CThreadFastMutex::SetTrace( bool b ) { UNREFERENCED_PARAMETER( b ); }

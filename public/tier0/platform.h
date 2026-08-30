@@ -87,7 +87,12 @@ typedef uint64_t uint64;
 //-----------------------------------------------------------------------------
 // Macros
 //-----------------------------------------------------------------------------
+// The Windows SDK (winnt.h) defines ARRAYSIZE with identical semantics. Only
+// supply ours when the SDK has not already done so, otherwise every
+// translation unit that includes windows.h first reports C4005.
+#ifndef ARRAYSIZE
 #define ARRAYSIZE(p)		(sizeof(p)/sizeof(p[0]))
+#endif
 #define UNREFERENCED_PARAMETER(p) (p)
 
 #define Q_min( a, b )		(((a) < (b)) ? (a) : (b))

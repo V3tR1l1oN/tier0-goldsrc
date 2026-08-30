@@ -319,22 +319,31 @@ bool cpuid( unsigned int instruction, unsigned int& outEax, unsigned int& outEbx
 tchar* GetProcessorVendorId()
 {
 	static tchar VendorID[ 13 ];
+	static volatile LONG s_InitState = 0;
 
-	static unsigned int unused, VendorIDSegment[ 3 ];
-
-	memset( VendorID, 0, sizeof( VendorID ) );
-
-	unused = 0;
-
-	if( cpuid( 0, unused, VendorIDSegment[ 0 ], VendorIDSegment[ 2 ], VendorIDSegment[ 1 ] ) )
+	if( InterlockedCompareExchange( &s_InitState, 1, 0 ) == 0 )
 	{
-		*reinterpret_cast<unsigned int*>( VendorID ) = VendorIDSegment[ 0 ];
-		*( reinterpret_cast<unsigned int*>( VendorID ) + 1 ) = VendorIDSegment[ 1 ];
-		*( reinterpret_cast<unsigned int*>( VendorID ) + 2 ) = VendorIDSegment[ 2 ];
+		unsigned int unused = 0;
+		unsigned int VendorIDSegment[ 3 ] = {};
+
+		memset( VendorID, 0, sizeof( VendorID ) );
+		if( cpuid( 0, unused, VendorIDSegment[ 0 ], VendorIDSegment[ 2 ], VendorIDSegment[ 1 ] ) )
+		{
+			*reinterpret_cast<unsigned int*>( VendorID ) = VendorIDSegment[ 0 ];
+			*( reinterpret_cast<unsigned int*>( VendorID ) + 1 ) = VendorIDSegment[ 1 ];
+			*( reinterpret_cast<unsigned int*>( VendorID ) + 2 ) = VendorIDSegment[ 2 ];
+		}
+		else
+		{
+			_tcscpy( VendorID, _T( "Generic_x86" ) );
+		}
+
+		InterlockedExchange( &s_InitState, 2 );
 	}
 	else
 	{
-		_tcscpy( VendorID, _T( "Generic_x86" ) );
+		while( InterlockedCompareExchange( &s_InitState, 0, 0 ) != 2 )
+			Sleep( 0 );
 	}
 
 	return VendorID;
@@ -376,6 +385,19 @@ static unsigned int PopCount( unsigned int x )
 	return c;
 }
 
+static void FallbackProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical,
+	unsigned long dwProcAff, bool bRestricted )
+{
+	nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
+	if( bRestricted )
+	{
+		const unsigned int allowed = PopCount( ( unsigned int )dwProcAff );
+		if( allowed != 0 )
+			nLogical = allowed;
+	}
+	nPhysical = nLogical;
+}
+
 extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
 extern "C" __declspec(dllimport) int __stdcall GetProcessAffinityMask(void *, unsigned long *, unsigned long *);
 
@@ -405,10 +427,9 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 
 	if( dwSize == 0 )
 	{
-		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
-		nPhysical = nLogical;
-		if( bRestricted )
-			nLogical = PopCount( dwProcAff ); // fallback path must stay affinity-aware
+		// The API can be unavailable or fail its size probe. Keep this fallback
+		// affinity-aware just like the normal RelationAll path.
+		FallbackProcessorCounts( nLogical, nPhysical, dwProcAff, bRestricted );
 		return;
 	}
 
@@ -417,8 +438,9 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 
 	if( !pBuf )
 	{
-		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
-		nPhysical = nLogical;
+		// Allocation failure must not silently undo the process-affinity
+		// contract. The old path reported every machine CPU here.
+		FallbackProcessorCounts( nLogical, nPhysical, dwProcAff, bRestricted );
 		return;
 	}
 
@@ -430,6 +452,10 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 
 		while( off < dwSize )
 		{
+			// A zero-length record would leave `off` unchanged and spin forever.
+			if( p->Size == 0 )
+				break;
+
 			switch( p->Relationship )
 			{
 				case RelationProcessorCore:
@@ -458,17 +484,24 @@ static void DetectProcessorCounts( uint32_t& nLogical, uint32_t& nPhysical )
 
 	free( pBuf );
 
-	if( nLogical == 0 )
-		nLogical = GetActiveProcessorCount( ALL_PROCESSOR_GROUPS );
-	if( nPhysical == 0 )
-		nPhysical = nLogical;
+	if( nLogical == 0 || nPhysical == 0 )
+	{
+		uint32_t fallbackLogical = 0;
+		uint32_t fallbackPhysical = 0;
+		FallbackProcessorCounts( fallbackLogical, fallbackPhysical, dwProcAff, bRestricted );
+		if( nLogical == 0 )
+			nLogical = fallbackLogical;
+		if( nPhysical == 0 )
+			nPhysical = fallbackPhysical;
+	}
 }
 
 PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 {
 	static CPUInformation pi{};
+	static volatile LONG s_InitState = 0;
 
-	if( pi.m_Size != sizeof( CPUInformation ) )
+	if( InterlockedCompareExchange( &s_InitState, 1, 0 ) == 0 )
 	{
 		pi.m_Size = sizeof( CPUInformation );
 
@@ -476,8 +509,11 @@ PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 		pi.m_szProcessorID = GetProcessorVendorId();
 
 		unsigned int nEax = 0, nEbx = 0, nEcx = 0, nEdx = 0;
+		unsigned int maxBasicLeaf = 0;
 
-		if( cpuid( 1, nEax, nEbx, nEcx, nEdx ) )
+		if( cpuid( 0, maxBasicLeaf, nEbx, nEcx, nEdx )
+			&& maxBasicLeaf >= 1
+			&& cpuid( 1, nEax, nEbx, nEcx, nEdx ) )
 		{
 			pi.m_bFPU   = ( nEdx & ( 1u <<  0 ) ) != 0;
 			pi.m_bRDTSC = ( nEdx & ( 1u <<  4 ) ) != 0;
@@ -497,8 +533,11 @@ PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 		}
 
 		unsigned int nEax2 = 0, nEbx2 = 0, nEcx2 = 0, nEdx2 = 0;
+		unsigned int maxExtendedLeaf = 0;
 
-		if( cpuid( 0x80000001, nEax2, nEbx2, nEcx2, nEdx2 ) )
+		if( cpuid( 0x80000000, maxExtendedLeaf, nEbx2, nEcx2, nEdx2 )
+			&& maxExtendedLeaf >= 0x80000001
+			&& cpuid( 0x80000001, nEax2, nEbx2, nEcx2, nEdx2 ) )
 		{
 			pi.m_b3DNow = ( nEdx2 & ( 1u << 31 ) ) != 0;
 			pi.m_bSSE4A = ( nEcx2 & ( 1u <<  6 ) ) != 0;
@@ -510,6 +549,14 @@ PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 			pi.m_nLogicalProcessors = 1;
 		if( !pi.m_nPhysicalProcessors )
 			pi.m_nPhysicalProcessors = pi.m_nLogicalProcessors;
+
+		// Publish the fully populated structure only after every field is ready.
+		InterlockedExchange( &s_InitState, 2 );
+	}
+	else
+	{
+		while( InterlockedCompareExchange( &s_InitState, 0, 0 ) != 2 )
+			Sleep( 0 );
 	}
 
 	return pi;

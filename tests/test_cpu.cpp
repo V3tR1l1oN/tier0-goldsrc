@@ -11,6 +11,7 @@
 // source the DLL is built from.
 #include <stdio.h>
 #include <stdlib.h>
+#include <process.h>
 
 #include "../tier0/cpu.cpp"
 #include "../tier0/fasttimer.cpp"
@@ -29,18 +30,89 @@ static unsigned int PopCountUL( unsigned long x )
 	return c;
 }
 
+struct CpuProbe_t
+{
+	HANDLE hStart;
+	const CPUInformation *pInfo;
+};
+
+static unsigned __stdcall CpuProbeProc( void *pv )
+{
+	CpuProbe_t *pProbe = ( CpuProbe_t * )pv;
+	WaitForSingleObject( pProbe->hStart, INFINITE );
+	pProbe->pInfo = &GetCPUInformation();
+	return 0;
+}
+
 int main( int argc, char **argv )
 {
 	// Optional: pin this process to N CPUs before detection, proving the
-	// affinity-aware path. E.g. `test_cpu 4` must report logical == 4.
+	// affinity-aware path. Build the mask from CPUs the process may already
+	// use; sandbox/host restrictions often exclude the low mask bits.
 	if ( argc > 1 && atoi( argv[ 1 ] ) > 0 )
 	{
 		const unsigned int n = ( unsigned int )atoi( argv[ 1 ] );
-		const unsigned long mask = ( n >= 32 ) ? 0xFFFFFFFFu : ( ( 1u << n ) - 1 );
-		SetProcessAffinityMask( ( void * )-1, mask );
+		unsigned long procAff = 0, systemAff = 0;
+		if( GetProcessAffinityMask( GetCurrentProcess(), &procAff, &systemAff ) )
+		{
+			unsigned long mask = 0;
+			unsigned int selected = 0;
+			for( unsigned int bit = 0; bit < sizeof( unsigned long ) * 8 && selected < n; ++bit )
+			{
+				const unsigned long bitMask = 1UL << bit;
+				if( procAff & bitMask )
+				{
+					mask |= bitMask;
+					++selected;
+				}
+			}
+			if( selected > 0 )
+				SetProcessAffinityMask( ( void * )-1, mask );
+		}
+	}
+
+	// Force first-use initialization through many callers at once. A plain
+	// `m_Size == 0` guard used to let readers observe a partially filled
+	// CPUInformation structure during startup.
+	const int kProbeCount = 16;
+	CpuProbe_t probes[ kProbeCount ] = {};
+	HANDLE probeThreads[ kProbeCount ] = {};
+	HANDLE hStart = CreateEventA( NULL, TRUE, FALSE, NULL );
+	CHECK( hStart != NULL, "failed to create CPU initialization barrier" );
+	if( hStart )
+	{
+		int created = 0;
+		for( int i = 0; i < kProbeCount; ++i )
+		{
+			probes[ i ].hStart = hStart;
+			probeThreads[ i ] = ( HANDLE )_beginthreadex( NULL, 0, CpuProbeProc, &probes[ i ], 0, NULL );
+			if( probeThreads[ i ] )
+				++created;
+			else
+				CHECK( false, "failed to create CPU probe thread" );
+		}
+
+		SetEvent( hStart );
+		if( created > 0 )
+		{
+			HANDLE live[ kProbeCount ];
+			int liveCount = 0;
+			for( int i = 0; i < kProbeCount; ++i )
+				if( probeThreads[ i ] )
+					live[ liveCount++ ] = probeThreads[ i ];
+			WaitForMultipleObjects( liveCount, live, TRUE, INFINITE );
+		}
+
+		for( int i = 0; i < kProbeCount; ++i )
+			if( probeThreads[ i ] )
+				CloseHandle( probeThreads[ i ] );
+		CloseHandle( hStart );
 	}
 
 	const CPUInformation &pi = GetCPUInformation();
+	for( int i = 0; i < kProbeCount; ++i )
+		if( probes[ i ].pInfo )
+			CHECK( probes[ i ].pInfo == &pi, "concurrent callers returned different CPUInformation storage" );
 
 	CHECK( pi.m_Size == ( int )sizeof( CPUInformation ), "m_Size must equal sizeof(CPUInformation)" );
 	CHECK( pi.m_szProcessorID && pi.m_szProcessorID[ 0 ], "vendor string empty" );

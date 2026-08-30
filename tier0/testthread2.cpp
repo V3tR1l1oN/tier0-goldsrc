@@ -63,25 +63,26 @@ SpewRetval_t _SpewMessageType( SpewType_t spewType, const tchar* pMsgFormat, va_
 
 		iWritten = _sntprintf( pTempBuffer, ARRAYSIZE( pTempBuffer ) - 1, _T( "%s (%d) : " ), _T( "unknown" ), s_Line );
 
-		if ( iWritten == -1 )
-		{
-		
-			return SPEW_ABORT;
-		}
+		if ( iWritten < 0 || (size_t)iWritten >= ARRAYSIZE( pTempBuffer ) - 1 )
+			iWritten = ( int )( ARRAYSIZE( pTempBuffer ) - 1 ) - 1;
+
+		pTempBuffer[ iWritten ] = _T( '\0' );
 
 		uiLeft = ( sizeof( pTempBuffer ) - 1 ) - iWritten;
 	}
 
 	int iAppendedWritten = _vsntprintf( &pTempBuffer[ iWritten ], uiLeft, pMsgFormat, args );
 
-	if ( iAppendedWritten == -1 )
-	{
-	
-		return SPEW_ABORT;
-	}
+	// _vsntprintf returns the would-be length on truncation (not -1) on modern
+	// MSVC; clamping keeps that oversized value from indexing past the buffer.
+	if ( iAppendedWritten < 0 || (size_t)iAppendedWritten >= uiLeft )
+		iAppendedWritten = ( int )uiLeft - 1;
 
 	if ( spewType == SPEW_ASSERT )
+	{
 		pTempBuffer[ iWritten + iAppendedWritten ] = '\n';
+		pTempBuffer[ iWritten + iAppendedWritten + 1 ] = _T( '\0' );
+	}
 
 	SpewRetval_t retval = GetSpewOutputFunc()( spewType, pTempBuffer );
 
@@ -178,9 +179,18 @@ static DWORD WINAPI TestThreadProc( LPVOID pvArg )
 
 void Test_RunTest( TestFunc func, void *pvArg )
 {
-	InitializeCriticalSection( &g_TestThreadInfo.cs );
-	g_TestThreadInfo.hRunTestThread	= CreateEventA( NULL, FALSE, FALSE, NULL );
-	g_TestThreadInfo.hRunMainThread	= CreateEventA( NULL, FALSE, FALSE, NULL );
+	// One-time setup: a second Test_RunTest() used to re-init the critical
+	// section while the driver thread might be inside it and to overwrite (and
+	// leak) both event handles.
+	if ( !g_TestThreadInfo.hRunTestThread )
+	{
+		InitializeCriticalSection( &g_TestThreadInfo.cs );
+		g_TestThreadInfo.hRunTestThread	= CreateEventA( NULL, FALSE, FALSE, NULL );
+		g_TestThreadInfo.hRunMainThread	= CreateEventA( NULL, FALSE, FALSE, NULL );
+	}
+
+	if ( !g_TestThreadInfo.hRunTestThread || !g_TestThreadInfo.hRunMainThread )
+		return;
 
 	g_TestHarness.m_ulMainThreadID	= ( ThreadId_t )( uintptr_t )GetCurrentThreadId();
 	g_TestHarness.m_bTestActive		= true;
