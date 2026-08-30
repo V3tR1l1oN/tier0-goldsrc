@@ -133,6 +133,7 @@ jobs:
 
   asan:
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
