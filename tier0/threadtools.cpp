@@ -152,6 +152,76 @@ static double SlpNow()
 	return Plat_FloatTime();
 }
 
+//-----------------------------------------------------------------------------
+// High-resolution system timer. Raising the global timer resolution with
+// timeBeginPeriod(1) is a process-wide, machine-wide effect -- it makes every
+// process's Sleep/timers tick at 1 ms granularity and keeps background
+// wakeups/power draw elevated for as long as the call is outstanding, which is
+// also true for the other processes on the box. We raise it once when precise
+// sleep first needs it, and pair it with timeEndPeriod(1) on DLL unload so we
+// do not leak a system-wide side effect for the lifetime of the process.
+//
+// Success is a strict superset of what precise pacing needs: with the coarse
+// ::Sleep quantized to the ~15.6 ms system timer, a 10 ms tick wakes at 15.6 ms
+// no matter how long the QPC tail spins. Set TIER0_HIGHRES_TIMER=0 to opt out
+// of touching the global timer resolution entirely (the pace degrades back
+// toward the legacy behavior; users who need that are normally also setting
+// TIER0_PRECISE_SLEEP=0).
+//-----------------------------------------------------------------------------
+
+static bool BHighResTimerEnabled()
+{
+	static volatile LONG s_mode = -1;
+	LONG mode = InterlockedCompareExchange( &s_mode, -1, -1 );
+	if( mode == -1 )
+	{
+		if( InterlockedCompareExchange( &s_mode, -2, -1 ) == -1 )
+		{
+			const char *psz = getenv( "TIER0_HIGHRES_TIMER" );
+			InterlockedExchange( &s_mode, ( psz && psz[ 0 ] == '0' ) ? 0 : 1 );
+		}
+		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
+	}
+	while( mode == -2 )
+	{
+		Sleep( 0 );
+		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
+	}
+	return mode != 0;
+}
+
+// timeBeginPeriod state machine, file-scope so teardown can pair the raise:
+//   0 = not raised yet, 1 = raise in progress, 2 = raised (owned),
+//   3 = raise failed, 4 = released via timeEndPeriod.
+static volatile LONG s_HighResState = 0;
+
+void Tier0ShutdownHighResTimer()
+{
+	// Pair the raise. Only the thread that owns the raise (state 2) may release
+	// it; the CAS from 2 -> 4 claims that ownership exactly once, so a detach
+	// racing a late PreciseSleep caller can never release someone else's raise
+	// or release twice.
+	if( InterlockedCompareExchange( &s_HighResState, 4, 2 ) == 2 )
+		timeEndPeriod( 1 );
+}
+
+static void PreciseSleepRaiseTimer()
+{
+	if( !BHighResTimerEnabled() )
+		return;
+
+	if( InterlockedCompareExchange( &s_HighResState, 1, 0 ) == 0 )
+	{
+		const LONG state = ( timeBeginPeriod( 1 ) == 0 ) ? 2 : 3;
+		InterlockedExchange( &s_HighResState, state );
+	}
+	else
+	{
+		while( InterlockedCompareExchange( &s_HighResState, 0, 0 ) == 1 )
+			Sleep( 0 );
+	}
+}
+
 void PreciseSleep( unsigned duration )
 {
 	if ( duration == 0 )
@@ -178,17 +248,7 @@ void PreciseSleep( unsigned duration )
 		return;
 	}
 
-	static volatile LONG s_HighResState = 0;
-	if( InterlockedCompareExchange( &s_HighResState, 1, 0 ) == 0 )
-	{
-		const LONG state = ( timeBeginPeriod( 1 ) == 0 ) ? 2 : 3;
-		InterlockedExchange( &s_HighResState, state );
-	}
-	else
-	{
-		while( InterlockedCompareExchange( &s_HighResState, 0, 0 ) == 1 )
-			Sleep( 0 );
-	}
+	PreciseSleepRaiseTimer();
 
 	const double target = ( double )duration / 1000.0;
 	const double tStart = SlpNow();

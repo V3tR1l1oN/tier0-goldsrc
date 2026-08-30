@@ -170,6 +170,17 @@ void *MemAllocScratch( unsigned long nBytes )
 {
 	s_ScratchMutex.Lock();
 
+	// Depth guard: scratch is a shallow LIFO in practice. The old code wrapped
+	// the size history through a %SCRATCH_MAX_DEPTH ring, so a 33rd nested
+	// allocation silently overwrote an older slot and MemFreeScratch then
+	// subtracted a stale size -- corrupting the accounting and handouts. Refuse
+	// to grow beyond the depth cap instead of corrupting.
+	if ( s_nScratchDepth >= SCRATCH_MAX_DEPTH )
+	{
+		s_ScratchMutex.Unlock();
+		return NULL;
+	}
+
 	size_t needed = s_nScratchBufAllocated + nBytes;
 	if ( needed > s_nScratchBufMax )
 	{
@@ -195,7 +206,8 @@ void *MemAllocScratch( unsigned long nBytes )
 	size_t offset = s_nScratchBufAllocated;
 	s_nScratchBufAllocated += nBytes;
 
-	s_ScratchSizes[ s_nScratchDepth % SCRATCH_MAX_DEPTH ] = nBytes;
+	// Index by exact depth (no modulo wrap): pop reads back the size it pushed.
+	s_ScratchSizes[ s_nScratchDepth ] = nBytes;
 	s_nScratchDepth++;
 
 	void *pResult = ( byte * )s_pScratchBuf + offset;
@@ -209,7 +221,7 @@ void MemFreeScratch()
 	if ( s_nScratchDepth > 0 )
 	{
 		s_nScratchDepth--;
-		s_nScratchBufAllocated -= s_ScratchSizes[ s_nScratchDepth % SCRATCH_MAX_DEPTH ];
+		s_nScratchBufAllocated -= s_ScratchSizes[ s_nScratchDepth ];
 	}
 	s_ScratchMutex.Unlock();
 }

@@ -5,6 +5,11 @@
 #ifdef WIN32
 #include "winlite.h"
 
+// Defined in threadtools.cpp: pairs the one-time timeBeginPeriod(1) timer
+// raise (PreciseSleep) with timeEndPeriod(1) so we do not leak a global
+// system-wide timer-resolution side effect for the lifetime of the process.
+void Tier0ShutdownHighResTimer();
+
 // AddVectoredExceptionHandler() comes from the SDK header (errhandlingapi.h);
 // re-declaring it here without dllimport produced C4273 "inconsistent dll
 // linkage" and risked binding to the wrong symbol.
@@ -321,6 +326,12 @@ extern "C" BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvR
 
 		// Install vectored exception handler for crash logging
 		AddVectoredExceptionHandler( 1, Tier0_VectoredHandler );
+	}
+	else if ( fdwReason == DLL_PROCESS_DETACH )
+	{
+		// Release the process-wide high-resolution timer raised by PreciseSleep
+		// so the global timer resolution is not left elevated after we unload.
+		Tier0ShutdownHighResTimer();
 	}
 	return TRUE;
 }

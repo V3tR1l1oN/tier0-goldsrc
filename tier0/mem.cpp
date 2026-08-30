@@ -1418,16 +1418,65 @@ int CStdMemAlloc::CrtSetReportMode( int nReportType, int nReportMode )
 	return 0;
 }
 
+static bool IsAccessibleSpan( const void* pMem, size_t size, int bWrite )
+{
+	// Mirrors the crash handler's guarded memory check (tier0.cpp): validate
+	// that [pMem, pMem+size) is committed and carries the requested access.
+	// VirtualQuery on a junk pointer fails safely, so this never faults.
+	if ( !pMem )
+		return false;
+
+	MEMORY_BASIC_INFORMATION mbi;
+	unsigned char* addr = ( unsigned char* )pMem;
+	unsigned char* const end = addr + size;
+
+	while ( addr < end )
+	{
+		if ( VirtualQuery( addr, &mbi, sizeof( mbi ) ) != sizeof( mbi ) )
+			return false;
+		if ( mbi.State != MEM_COMMIT || ( mbi.Protect & ( PAGE_GUARD | PAGE_NOACCESS ) ) )
+			return false;
+		const unsigned char* regionEnd = ( const unsigned char* )mbi.BaseAddress + mbi.RegionSize;
+		if ( !( mbi.Protect & ( PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY
+			| PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY ) ) )
+			return false;
+		if ( bWrite && !( mbi.Protect & ( PAGE_READWRITE | PAGE_WRITECOPY
+			| PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY ) ) )
+			return false;
+		addr = ( unsigned char* )regionEnd;
+	}
+	return true;
+}
+
 int CStdMemAlloc::CrtIsValidHeapPointer( const void* pMem )
 {
-	return pMem != nullptr;
+	// Honest validity instead of "non-NULL" fiction. A pointer is valid if it is
+	// a live SBA pool block or a genuine CRT-heap block -- the same ownership
+	// classification GetSize() uses. NULL, foreign or junk pointers are invalid.
+	//
+	// Gate on cheap accessible-region first: an unmapped/junk pointer is not a
+	// live heap block and must fail fast (the SBA walk / HeapValidate below are
+	// only ever run against real, readable addresses, so they terminate quickly
+	// and never fault). HeapValidate(..., lpMem) validates a single candidate
+	// block safely and returns FALSE for anything not live in that heap.
+	if ( !pMem || !IsAccessibleSpan( pMem, 1, 0 ) )
+		return 0;
+
+	if ( SBAFastClassify( const_cast<void*>( pMem ) ) != SBA_NO_BUCKET )
+		return 1;
+
+#ifdef WIN32
+	return HeapValidate( ( HANDLE )_get_heap_handle(), 0, pMem ) ? 1 : 0;
+#else
+	return 0;
+#endif
 }
 
 int CStdMemAlloc::CrtIsValidPointer( const void* pMem, unsigned int size, int access )
 {
-	UNREFERENCED_PARAMETER( size );
-	UNREFERENCED_PARAMETER( access );
-	return pMem != nullptr;
+	// access == 0 -> readable; nonzero -> writable. Actually probe the span
+	// instead of returning "non-NULL" for arbitrary garbage pointers.
+	return IsAccessibleSpan( pMem, size, access != 0 ) ? 1 : 0;
 }
 
 int CStdMemAlloc::CrtCheckMemory()
@@ -1515,7 +1564,22 @@ int CStdMemAlloc::CrtDbgReport( int nRptType, const char* szFile,
 
 int CStdMemAlloc::heapchk()
 {
-	return 2; // _HEAPOK (legacy MSVC CRT value, matches the era of the original DLL)
+	// Run a genuine integrity check of the CRT heap instead of returning the
+	// era constant unconditionally. On a healthy heap this returns _HEAPOK
+	// (=2), preserving the documented/expected value; only real corruption now
+	// surfaces as a non-_HEAPOK error code instead of being silently masked.
+	//
+	// _heapchk() itself is unusable here: this CRT returns -2 (0xFFFFFFFE) on
+	// an entirely healthy heap in this allocator/CRT configuration, which would
+	// falsely flag corruption. HeapValidate on the actual CRT heap handle is the
+	// authoritative check and correctly reports TRUE on a healthy heap.
+#ifdef WIN32
+	if ( HeapValidate( ( HANDLE )_get_heap_handle(), 0, NULL ) )
+		return 2; // _HEAPOK
+	return _HEAPBADNODE; // genuine heap corruption surfaced, not masked
+#else
+	return 2; // _HEAPOK
+#endif
 }
 
 bool CStdMemAlloc::IsDebugHeap()
