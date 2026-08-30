@@ -10,12 +10,122 @@
 #ifndef TIER0_PLATFORM_H
 #define TIER0_PLATFORM_H
 
-#ifdef _WIN32
-#define WIN32 1
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
-#endif
-#include <windows.h>
+//-----------------------------------------------------------------------------
+// Platform detection -- Valve style: _WIN32 vs _LINUX (common/port.h)
+//-----------------------------------------------------------------------------
+#if defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
+	#ifndef _WIN32
+	#define _WIN32 1
+	#endif
+	#define WIN32 1
+	#ifndef _WIN32_WINNT
+	#define _WIN32_WINNT 0x0601
+	#endif
+	#include <windows.h>
+#elif defined(_LINUX) || defined(__linux__) || defined(linux) || defined(POSIX)
+	#ifndef _LINUX
+	#define _LINUX 1
+	#endif
+	#ifndef POSIX
+	#define POSIX 1
+	#endif
+	// Valve common/port.h -- Linux shims
+	#include <dlfcn.h>
+	#include <unistd.h>
+	#include <sys/time.h>
+	#include <sys/types.h>
+	#include <time.h>
+	#include <strings.h>
+	#include <limits.h>
+
+	#ifndef MAX_PATH
+	#define MAX_PATH 260
+	#endif
+
+	// HMODULE / handles -- Valve port.h: void*
+	#ifndef HMODULE
+	typedef void* HMODULE;
+	#endif
+	#ifndef HINSTANCE
+	typedef void* HINSTANCE;
+	#endif
+	#ifndef HANDLE
+	typedef void* HANDLE;
+	#endif
+
+	#define GetProcAddress(h, n) dlsym((h), (n))
+	#define LoadLibrary(x) dlopen((x), RTLD_NOW)
+	#define LoadLibraryA(x) dlopen((x), RTLD_NOW)
+	#define LoadLibraryExA(a,b,c) dlopen((a), RTLD_NOW)
+	#define FreeLibrary(x) dlclose(x)
+	// GetModuleHandle on Linux: try RTLD_NOLOAD to not increment refcount
+	#ifndef GetModuleHandleA
+	#define GetModuleHandleA(x) dlopen((x), RTLD_NOW | RTLD_NOLOAD)
+	#endif
+	#ifndef GetCurrentProcess
+	#define GetCurrentProcess() ((HANDLE)0)
+	#endif
+
+	// string / snprintf -- Valve: _snprintf -> snprintf
+	#ifndef _snprintf
+	#define _snprintf snprintf
+	#endif
+	#ifndef _vsnprintf
+	#define _vsnprintf vsnprintf
+	#endif
+	#ifndef _stricmp
+	#define _stricmp strcasecmp
+	#endif
+	#ifndef stricmp
+	#define stricmp strcasecmp
+	#endif
+	#ifndef _strnicmp
+	#define _strnicmp strncasecmp
+	#endif
+	#ifndef strnicmp
+	#define strnicmp strncasecmp
+	#endif
+	#ifndef _alloca
+	#define _alloca alloca
+	#endif
+
+	// calling conventions -- no-op on Linux
+	#ifndef __stdcall
+	#define __stdcall
+	#endif
+	#ifndef __cdecl
+	#define __cdecl
+	#endif
+	#ifndef WINAPI
+	#define WINAPI
+	#endif
+	#ifndef STILL_ACTIVE
+	#define STILL_ACTIVE 259
+	#endif
+	#ifndef MAXIMUM_WAIT_OBJECTS
+	#define MAXIMUM_WAIT_OBJECTS 64
+	#endif
+	#ifndef TRUE
+	#define TRUE 1
+	#endif
+	#ifndef FALSE
+	#define FALSE 0
+	#endif
+	typedef int BOOL;
+	typedef unsigned long DWORD;
+	typedef unsigned long ULONG;
+	typedef void* LPVOID;
+	typedef const void* LPCVOID;
+	typedef char* LPSTR;
+	typedef const char* LPCSTR;
+	typedef void* HKEY;
+#else
+	// Unknown -- default to Windows for backward compat
+	#define WIN32 1
+	#ifndef _WIN32_WINNT
+	#define _WIN32_WINNT 0x0601
+	#endif
+	#include <windows.h>
 #endif
 
 #include <cstddef>
@@ -26,8 +136,28 @@
 #include <cstdarg>
 #include <cfloat>
 #include <cmath>
+
+#ifdef _WIN32
 #include <tchar.h>
 #include <intrin.h>
+#else
+	// Linux: tchar is char (no _UNICODE wchar path on dedicated server)
+	#include <strings.h>
+	// __rdtsc fallback for CCycleCount
+	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED)
+		#if defined(__i386__) || defined(__x86_64__)
+			inline unsigned long long __rdtsc()
+			{
+				unsigned int lo, hi;
+				__asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+				return ((unsigned long long)hi << 32) | lo;
+			}
+		#else
+			// generic: use clock as fallback
+			inline unsigned long long __rdtsc() { return 0; }
+		#endif
+	#endif
+#endif
 
 //-----------------------------------------------------------------------------
 // Basic types
@@ -53,7 +183,9 @@ typedef char			tchar;
 #define TCHAR_IS_CHAR	1
 #endif
 
-#ifdef WIN32
+#if defined(WIN32) || defined(_WIN32)
+typedef void* ThreadHandle_t;
+#elif defined(_LINUX)
 typedef void* ThreadHandle_t;
 #endif
 
@@ -79,7 +211,11 @@ typedef uint64_t uint64;
 #define TT_INTERFACE		extern "C"
 #endif
 
+#ifdef _WIN32
 #define NOINLINE			__declspec( noinline )
+#else
+#define NOINLINE			__attribute__((noinline))
+#endif
 
 #define DBG_CLASS
 #define TT_CLASS

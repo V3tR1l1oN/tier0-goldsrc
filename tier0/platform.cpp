@@ -7,10 +7,20 @@
 //=============================================================================//
 #include "platform.h"
 
+#if defined(_WIN32) || defined(WIN32)
 #undef ARRAYSIZE
 #include "winlite.h"
 #ifndef ARRAYSIZE
 #define ARRAYSIZE( p ) ( sizeof(p) / sizeof((p)[0]) )
+#endif
+#else
+// Linux: need time headers for Plat_FloatTime (gettimeofday / clock_gettime)
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+#ifndef ARRAYSIZE
+#define ARRAYSIZE( p ) ( sizeof(p) / sizeof((p)[0]) )
+#endif
 #endif
 
 using VTuneFunc = int ( * )();
@@ -20,7 +30,7 @@ static VTuneFunc VTPauseFn = nullptr;
 
 bool vtune( bool resume )
 {
-#ifdef WIN32
+#if defined(WIN32) || defined(_WIN32)
 	static bool bLoaded = false;
 
 	if( !bLoaded )
@@ -45,27 +55,58 @@ bool vtune( bool resume )
 
 	return true;
 #else
+	// Linux: no VTune
+	(void)resume;
 	return true;
 #endif
 }
 
 PLATFORM_INTERFACE const tchar *Plat_GetCommandLine()
 {
+#if defined(_WIN32) || defined(WIN32)
 #ifdef TCHAR_IS_CHAR
 	return GetCommandLineA();
 #else
 	return GetCommandLineW();
 #endif
+#elif defined(_LINUX)
+	// Linux: GoldSrc dedicated server passes command line via Plat_GetCommandLine
+	// Keep a static buffer filled from /proc/self/cmdline if needed; fallback to empty.
+	static char s_szCmdLine[ 2048 ] = {0};
+	static bool s_bInit = false;
+	if( !s_bInit )
+	{
+		s_bInit = true;
+		// try to read /proc/self/cmdline for completeness
+		FILE *f = fopen( "/proc/self/cmdline", "rb" );
+		if( f )
+		{
+			size_t n = fread( s_szCmdLine, 1, sizeof(s_szCmdLine)-1, f );
+			for( size_t i = 0; i < n; ++i )
+				if( s_szCmdLine[i] == '\0' ) s_szCmdLine[i] = ' ';
+			fclose( f );
+		}
+	}
+	return s_szCmdLine;
+#else
+	return "";
+#endif
 }
 
-#ifdef WIN32
+#if defined(WIN32) || defined(_WIN32)
 bool Plat_IsInDebugSession()
 {
 	return IsDebuggerPresent() != 0;
 }
+#else
+// Linux stub -- no debugger detection via IsDebuggerPresent()
+bool Plat_IsInDebugSession()
+{
+	return false;
+}
 #endif
 
-#ifdef WIN32
+#if defined(WIN32) || defined(_WIN32)
 static LARGE_INTEGER g_Frequency = {};
 static double g_Scale = 0.0;
 static LARGE_INTEGER g_PerfCount = {};
@@ -115,7 +156,7 @@ static void InitPlatTimer()
 
 double Plat_FloatTime()
 {
-#ifdef WIN32
+#if defined(WIN32) || defined(_WIN32)
 	InitPlatTimer();
 
 	LARGE_INTEGER PerformanceCount;
@@ -124,23 +165,45 @@ double Plat_FloatTime()
 
 	return ( double )( GetTickCount() - g_TickBase ) * 0.001;
 #else
-	static int secbase = 0;
+	// Linux -- Valve's common/port.h style: monotonic clock.
+	// Prefer clock_gettime(CLOCK_MONOTONIC) (nsec, not affected by NTP),
+	// fallback to gettimeofday for very old toolchains.
+	static bool s_bInit = false;
+	static struct timespec s_tsBase = {0,0};
+	static time_t s_secBase = 0;
 
-	long double result;
-	timeval tp;
-
-	gettimeofday( &tp, 0 );
-	if( secbase )
+	struct timespec ts;
+	if( clock_gettime( CLOCK_MONOTONIC, &ts ) == 0 )
 	{
-		result = ( long double ) ( tp.tv_sec - secbase ) + ( long double ) tp.tv_usec / 1000000.0;
-		if( g_VCRMode )
-			g_pVCR->Hook_Sys_FloatTime( result );
+		if( !s_bInit )
+		{
+			s_tsBase = ts;
+			s_bInit = true;
+			return 0.0;
+		}
+		double result = (double)( ts.tv_sec - s_tsBase.tv_sec ) + (double)ts.tv_nsec / 1e9;
+		return result;
+	}
+
+	// fallback: gettimeofday (wall clock)
+	struct timeval tp;
+	gettimeofday( &tp, NULL );
+	if( s_bInit && s_secBase != 0 )
+	{
+		return (double)( tp.tv_sec - s_secBase ) + (double)tp.tv_usec / 1e6;
 	}
 	else
 	{
-		result = ( long double ) tp.tv_usec / 1000000.0;
-		secbase = tp.tv_sec;
+		// first call -- init base, return fractional part only like original Valve code
+		if( !s_bInit )
+		{
+			s_bInit = true;
+			s_secBase = tp.tv_sec;
+			// keep monotonic base in sync if we later switch
+			s_tsBase.tv_sec = tp.tv_sec;
+			s_tsBase.tv_nsec = tp.tv_usec * 1000;
+		}
+		return (double)tp.tv_usec / 1e6;
 	}
-	return result;
 #endif
 }

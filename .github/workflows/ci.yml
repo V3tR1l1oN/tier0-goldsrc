@@ -25,7 +25,7 @@ jobs:
         shell: cmd
         run: |
           dumpbin /EXPORTS build\tier0.dll > build\exports.txt
-          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern '^\s*313 number of functions\s*$')) { Get-Content build\exports.txt | Select-Object -Last 5; Write-Error 'export count != 313'; exit 1 }"
+          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern '^\s*314 number of functions\s*$')) { Get-Content build\exports.txt | Select-Object -Last 5; Write-Error 'export count != 314'; exit 1 }"
 
       - name: Build test harnesses
         shell: cmd
@@ -154,7 +154,7 @@ jobs:
         shell: cmd
         run: |
           dumpbin /EXPORTS build\tier0.dll > build\exports.txt
-          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern '^\s*313 number of functions\s*$')) { Write-Error 'export count != 313'; exit 1 }"
+          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern '^\s*314 number of functions\s*$')) { Write-Error 'export count != 314'; exit 1 }"
 
       - name: Build test harnesses
         shell: cmd

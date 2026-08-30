@@ -313,3 +313,4 @@ g_dwClockSpeed		@310
 g_pMemAlloc		@311
 g_ulLastCycleSample		@312
 vtune	@313
+CreateInterface		@314

@@ -5,6 +5,7 @@
 
 #ifdef WIN32
 #include "winlite.h"
+#include "../public/tier1/interface.h"
 
 // Defined in threadtools.cpp: pairs the one-time timeBeginPeriod(1) timer
 // raise (PreciseSleep) with timeEndPeriod(1) so we do not leak a global
@@ -377,6 +378,14 @@ extern "C" BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvR
 
 		// Install vectored exception handler for crash logging
 		g_hVeh = AddVectoredExceptionHandler( 1, Tier0_VectoredHandler );
+
+		// Ensure InterfaceReg factory (CreateInterface ord. 314) is linked and
+		// available via Sys_GetFactoryThis. Static InterfaceReg instances
+		// self-register through their constructors before DllMain.
+		{
+			CreateInterfaceFn pFactory = Sys_GetFactoryThis();
+			(void)pFactory;
+		}
 	}
 	else if ( fdwReason == DLL_PROCESS_DETACH )
 	{
