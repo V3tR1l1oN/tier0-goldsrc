@@ -860,22 +860,25 @@ struct ThreadInit_t
 
 bool CThread::Start( unsigned nBytesStack )
 {
-	HANDLE hNewThread;
 	CThreadEvent initComplete( false );
 	bool bInitSuccess = false;
 
-	ThreadInit_t Init = { this, &initComplete, &bInitSuccess };
+	ThreadInit_t *pInit = new ThreadInit_t;
+	pInit->pThread = this;
+	pInit->pInitCompleteEvent = &initComplete;
+	pInit->pfInitSuccess = &bInitSuccess;
 
-	hNewThread = CreateThread(
+	HANDLE hNewThread = ( HANDLE )_beginthreadex(
 		NULL,
 		nBytesStack,
-		( LPTHREAD_START_ROUTINE )( GetThreadProc() ),
-		&Init,
+		( unsigned (__stdcall *)( void * ) )GetThreadProc(),
+		pInit,
 		0,
-		( LPDWORD )&m_threadId );
+		( unsigned * )&m_threadId );
 
 	if ( hNewThread == NULL )
 	{
+		delete pInit;
 		AssertMsg1( false, "Failed to create thread (error 0x%x)", GetLastError() );
 		return false;
 	}
@@ -885,16 +888,12 @@ bool CThread::Start( unsigned nBytesStack )
 	if ( !WaitForCreateComplete( &initComplete ) )
 	{
 		Msg( "Thread failed to initialize\n" );
-		CloseHandle( m_hThread );
-		m_hThread = NULL;
 		return false;
 	}
 
 	if ( !bInitSuccess )
 	{
 		Msg( "Thread failed to initialize (2)\n" );
-		CloseHandle( m_hThread );
-		m_hThread = NULL;
 		return false;
 	}
 
@@ -1054,23 +1053,24 @@ unsigned __stdcall CThread::ThreadProc( void * pv )
 {
 	ThreadInit_t *pData = static_cast<ThreadInit_t *>( pv );
 
-	// `pData` points at a ThreadInit_t living on CThread::Start()'s stack. The
-	// init-complete event releases Start(), which then returns and destroys that
-	// frame -- so nothing may touch pData after the event is signalled. Cache
-	// everything needed first and use only the cached copy afterwards.
+	// `pData` was heap-allocated in CThread::Start() and owned by this thread.
+	// Cache everything needed before signalling, then Set() and delete.
 	CThread *pThread = pData->pThread;
+	CThreadEvent *pEvent = pData->pInitCompleteEvent;
+	bool *pfInitSuccess = pData->pfInitSuccess;
 
 	g_pCurThread = pThread;
 
-	if ( pData->pfInitSuccess )
-		*pData->pfInitSuccess = false;
+	if ( pfInitSuccess )
+		*pfInitSuccess = false;
 
 	const bool bInitSuccess = pThread->Init();
 
-	if ( pData->pfInitSuccess )
-		*pData->pfInitSuccess = bInitSuccess;
+	if ( pfInitSuccess )
+		*pfInitSuccess = bInitSuccess;
 
-	pData->pInitCompleteEvent->Set();
+	pEvent->Set();
+	delete pData;
 
 	// ---- pData is off limits from here on ----
 

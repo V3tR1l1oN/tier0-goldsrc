@@ -1,8 +1,14 @@
 // filesystem.cpp -- CFileSystem : IFileSystem (VFileSystem009)
 // Win32 implementation using CreateFile/ReadFile/FindFirstFile
-// GetReadBuffer cache via malloc + ReadFile (mmap-like zero-copy)
+// GetReadBuffer: true zero-copy via CreateFileMapping/MapViewOfFile (mmap).
+// Fallback path uses SBArena_AllocForFileSystem (VirtualAlloc arena) instead of malloc.
 #include "../public/tier1/interface.h"
 #include <windows.h>
+#include "../public/tier0/memalloc.h"
+
+// SBArena filesystem arena (exported from mem.cpp, VirtualAlloc-backed)
+extern "C" PLATFORM_INTERFACE void* SBArena_AllocForFileSystem(size_t nSize);
+extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nSize);
 #ifdef GetCurrentDirectory
 #undef GetCurrentDirectory
 #endif
@@ -73,6 +79,8 @@ struct FileHandleInternal
 	void *pReadBuffer = nullptr;
 	int nBufferSize = 0;
 	bool bIsWrite = false;
+	bool bIsMapped = false;               // true: pReadBuffer is MapViewOfFile
+	HANDLE hMapping = NULL;               // file mapping handle for zero-copy
 	std::string fileName;
 };
 
@@ -96,7 +104,18 @@ public:
 		{
 			if (fh)
 			{
-				if (fh->pReadBuffer) free(fh->pReadBuffer);
+				if (fh->pReadBuffer)
+				{
+					if (fh->bIsMapped)
+					{
+						UnmapViewOfFile(fh->pReadBuffer);
+						if (fh->hMapping) CloseHandle(fh->hMapping);
+					}
+					else
+					{
+						SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
+					}
+				}
 				if (fh->hFile != INVALID_HANDLE_VALUE) CloseHandle(fh->hFile);
 				delete fh;
 			}
@@ -328,7 +347,21 @@ public:
 	{
 		if (!file) return;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
-		if (fh->pReadBuffer) { free(fh->pReadBuffer); fh->pReadBuffer=nullptr; }
+		if (fh->pReadBuffer)
+		{
+			if (fh->bIsMapped)
+			{
+				UnmapViewOfFile(fh->pReadBuffer);
+				if (fh->hMapping) CloseHandle(fh->hMapping);
+			}
+			else
+			{
+				SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
+			}
+			fh->pReadBuffer=nullptr;
+			fh->hMapping=NULL;
+			fh->bIsMapped=false;
+		}
 		if (fh->hFile != INVALID_HANDLE_VALUE) CloseHandle(fh->hFile);
 		// remove from open list
 		for (auto it = m_OpenFiles.begin(); it != m_OpenFiles.end(); ++it)
@@ -451,7 +484,19 @@ public:
 		DWORD written=0;
 		if (!WriteFile(fh->hFile, pInput, (DWORD)size, &written, nullptr)) return 0;
 		// invalidate cached read buffer if we wrote
-		if (fh->pReadBuffer) { free(fh->pReadBuffer); fh->pReadBuffer=nullptr; fh->nBufferSize=0; }
+		if (fh->pReadBuffer)
+		{
+			if (fh->bIsMapped)
+			{
+				UnmapViewOfFile(fh->pReadBuffer);
+				if (fh->hMapping) CloseHandle(fh->hMapping);
+			}
+			else
+			{
+				SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
+			}
+			fh->pReadBuffer=nullptr; fh->nBufferSize=0; fh->bIsMapped=false; fh->hMapping=NULL;
+		}
 		return (int)written;
 	}
 	virtual char *ReadLine(char *pOutput, int maxChars, FileHandle_t file) override
@@ -524,7 +569,31 @@ public:
 		}
 		unsigned int sz = Size(file);
 		if (sz==0 || sz==0xFFFFFFFF) { if(outBufferSize) *outBufferSize=0; return nullptr; }
-		void *buf = malloc(sz);
+
+		// --- zero-copy path: try CreateFileMapping + MapViewOfFile (mmap) ---
+		// This is true zero-copy: OS maps file pages directly, no ReadFile memcpy.
+		// The view lives in the SBArena mmap address space and is cached until
+		// ReleaseReadBuffer / Close.
+		HANDLE hMap = CreateFileMappingA(fh->hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+		if (hMap)
+		{
+			void *pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+			if (pView)
+			{
+				fh->pReadBuffer = pView;
+				fh->nBufferSize = (int)sz;
+				fh->hMapping = hMap;
+				fh->bIsMapped = true;
+				if (outBufferSize) *outBufferSize = (int)sz;
+				return pView;
+			}
+			CloseHandle(hMap);
+		}
+
+		// --- fallback: SBArena (VirtualAlloc arena) + ReadFile ---
+		// Still cached, but allocation comes from SBArena_AllocForFileSystem
+		// (VirtualAlloc page-aligned arena) instead of malloc.
+		void *buf = SBArena_AllocForFileSystem(sz);
 		if (!buf) { if(outBufferSize) *outBufferSize=0; return nullptr; }
 		// save current pos
 		LARGE_INTEGER curPos, zero; zero.QuadPart=0;
@@ -546,11 +615,12 @@ public:
 		SetFilePointerEx(fh->hFile, curPos, nullptr, FILE_BEGIN);
 		if (total != sz)
 		{
-			// partial read? adjust size
 			sz = total;
 		}
 		fh->pReadBuffer = buf;
 		fh->nBufferSize = (int)sz;
+		fh->hMapping = NULL;
+		fh->bIsMapped = false;
 		if (outBufferSize) *outBufferSize = (int)sz;
 		return buf;
 	}
@@ -560,14 +630,32 @@ public:
 		FileHandleInternal *fh = (FileHandleInternal*)file;
 		if (fh->pReadBuffer == buffer)
 		{
-			free(buffer);
+			if (fh->bIsMapped)
+			{
+				UnmapViewOfFile(buffer);
+				if (fh->hMapping) CloseHandle(fh->hMapping);
+			}
+			else
+			{
+				SBArena_FreeForFileSystem(buffer, fh->nBufferSize);
+			}
 			fh->pReadBuffer = nullptr;
 			fh->nBufferSize = 0;
+			fh->hMapping = NULL;
+			fh->bIsMapped = false;
 		}
 		else
 		{
-			// not our cached buffer, just free (caller may have allocated)
-			free(buffer);
+			// not our cached buffer -- detect mapped vs arena
+			MEMORY_BASIC_INFORMATION mbi;
+			if (VirtualQuery(buffer, &mbi, sizeof mbi) == sizeof mbi && mbi.Type == MEM_MAPPED)
+			{
+				UnmapViewOfFile(buffer);
+			}
+			else
+			{
+				SBArena_FreeForFileSystem(buffer, 0);
+			}
 		}
 	}
 	virtual const char *FindFirst(const char *pWildCard, FileFindHandle_t *pHandle, const char *pathID = 0) override
