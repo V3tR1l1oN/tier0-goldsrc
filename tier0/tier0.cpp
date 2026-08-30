@@ -1,6 +1,7 @@
 #include "platform.h"
 #include "minidump.h"
 #include <tlhelp32.h>
+#include <stdint.h>
 
 #ifdef WIN32
 #include "winlite.h"
@@ -15,6 +16,7 @@ void Tier0ShutdownHighResTimer();
 // linkage" and risked binding to the wrong symbol.
 
 static HINSTANCE g_hInst = NULL;
+static PVOID g_hVeh = nullptr;
 static char g_szCrashLogPath[MAX_PATH];
 static volatile LONG g_CrashLogInitState = 0;
 static volatile LONG g_CrashInProgress = 0;
@@ -110,38 +112,51 @@ static void WriteLog(const char *text, int len)
         return;
 
     HANDLE hFile = CreateFileA(GetCrashLogPath(),
-        FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     if (hFile != INVALID_HANDLE_VALUE)
     {
         DWORD written;
         WriteFile(hFile, text, (DWORD)len, &written, NULL);
+        FlushFileBuffers(hFile);
         CloseHandle(hFile);
     }
 }
 
-static void LogAddr(void *addr)
+static void LogAddr(void *addr, HANDLE hSnap)
 {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (snap == INVALID_HANDLE_VALUE) return;
-
-    MODULEENTRY32 me;
-    me.dwSize = sizeof(me);
-
-    if (Module32First(snap, &me)) {
-        do {
-            if ((DWORD)addr >= (DWORD)me.modBaseAddr && (DWORD)addr < (DWORD)(me.modBaseAddr + me.modBaseSize)) {
-                char buf[512];
-                int len = _snprintf(buf, sizeof(buf) - 1, "  %s+%X\r\n", me.szModule, (DWORD)addr - (DWORD)me.modBaseAddr);
-                WriteLog(buf, ClampSnprintf(len, (int)sizeof(buf)));
-                CloseHandle(snap);
-                return;
-            }
-        } while (Module32Next(snap, &me));
+    if (hSnap != INVALID_HANDLE_VALUE && hSnap != NULL)
+    {
+        MODULEENTRY32 me;
+        me.dwSize = sizeof(me);
+        uintptr_t uaddr = (uintptr_t)addr;
+        if (Module32First(hSnap, &me)) {
+            do {
+                uintptr_t base = (uintptr_t)me.modBaseAddr;
+                if (uaddr >= base && uaddr < base + (uintptr_t)me.modBaseSize) {
+                    char buf[512];
+                    int len = _snprintf(buf, sizeof(buf) - 1, "  %s+%X\r\n", me.szModule, (unsigned int)(uaddr - base));
+                    WriteLog(buf, ClampSnprintf(len, (int)sizeof(buf)));
+                    return;
+                }
+            } while (Module32Next(hSnap, &me));
+        }
     }
-
     char buf[128];
     int len = _snprintf(buf, sizeof(buf) - 1, "  unknown(%p)\r\n", addr);
     WriteLog(buf, ClampSnprintf(len, (int)sizeof(buf)));
+}
+
+// Backward-compatible wrapper (creates temporary snapshot) — kept to avoid breaking internal callers
+static void LogAddr(void *addr)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) {
+        char buf[128];
+        int l = _snprintf(buf, sizeof(buf) - 1, "  unknown(%p)\r\n", addr);
+        WriteLog(buf, ClampSnprintf(l, (int)sizeof(buf)));
+        return;
+    }
+    LogAddr(addr, snap);
     CloseHandle(snap);
 }
 
@@ -160,48 +175,62 @@ static bool IsReadableMemory( const MEMORY_BASIC_INFORMATION& mbi, const BYTE *a
 		|| protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 }
 
-static void LogStackSweep(DWORD esp)
+static void LogStackSweep(DWORD esp, HANDLE hSnap)
 {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (snap == INVALID_HANDLE_VALUE) return;
+    bool bOwnSnap = false;
+    HANDLE snap = hSnap;
+    if (snap == INVALID_HANDLE_VALUE || snap == NULL)
+    {
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+        if (snap == INVALID_HANDLE_VALUE) return;
+        bOwnSnap = true;
+    }
 
     MODULEENTRY32 me;
     me.dwSize = sizeof(me);
 
     WriteLog("  Stack hits at ESP..ESP+0x6000 (dwords pointing into code):\r\n", 55);
     int logged = 0;
-    DWORD last = 0xFFFFFFFF;
+    uintptr_t last = (uintptr_t)-1;
     char buf[512];
 
     MEMORY_BASIC_INFORMATION mbi;
-    DWORD a = esp - 4;
-    DWORD end = esp + 0x6000;
+    uintptr_t a = (uintptr_t)esp - 4;
+    uintptr_t end = (uintptr_t)esp + 0x6000;
     for (; a < end && logged < 80; a += 4)
     {
-        if (VirtualQuery((LPCVOID)a, &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
-        if( !IsReadableMemory( mbi, ( const BYTE * )a, sizeof( DWORD ) ) ) continue;
+        if (VirtualQuery((LPCVOID)(uintptr_t)a, &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
+        if( !IsReadableMemory( mbi, ( const BYTE * )(uintptr_t)a, sizeof( DWORD ) ) ) continue;
 
-        DWORD v = *(volatile DWORD *)a;
+        DWORD v = 0;
+        __try { v = *(volatile DWORD *)(uintptr_t)a; } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
         if (v < 0x10000) continue;
+        uintptr_t uv = (uintptr_t)v;
         if (Module32First(snap, &me))
         {
             do
             {
-                if (v >= (DWORD)me.modBaseAddr && v < (DWORD)(me.modBaseAddr + me.modBaseSize))
+                uintptr_t base = (uintptr_t)me.modBaseAddr;
+                if (uv >= base && uv < base + (uintptr_t)me.modBaseSize)
                 {
-                    if (v != last)
+                    if (uv != last)
                     {
-                        int len = _snprintf(buf, sizeof(buf) - 1, "  %08X: %s+%X\r\n", a, me.szModule, v - (DWORD)me.modBaseAddr);
+                        int len = _snprintf(buf, sizeof(buf) - 1, "  %08X: %s+%X\r\n", (DWORD)a, me.szModule, (unsigned int)(uv - base));
                         WriteLog(buf, ClampSnprintf(len, (int)sizeof(buf)));
                         logged++;
-                        last = v;
+                        last = uv;
                     }
                     break;
                 }
             } while (Module32Next(snap, &me));
         }
     }
-    CloseHandle(snap);
+    if (bOwnSnap) CloseHandle(snap);
+}
+
+static void LogStackSweep(DWORD esp)
+{
+    LogStackSweep(esp, INVALID_HANDLE_VALUE);
 }
 
 static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
@@ -217,6 +246,10 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
         reason = "HEAP_CORRUPTION";
     else if ( code == 0x80000003 )
         reason = "BREAKPOINT";
+    else if ( code == 0xC00000FD )
+        reason = "STACK_OVERFLOW";
+    else if ( (code & 0xC0000000) == 0xC0000000 || (pExceptionInfo->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE) )
+        reason = "FATAL_EXCEPTION";
 
     if ( reason )
     {
@@ -227,8 +260,11 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
 
         RotateCrashLogIfNeeded();
 
+        // Create module snapshot once and reuse for all LogAddr calls
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+
         HANDLE hFile = CreateFileA(GetCrashLogPath(),
-            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
         {
             char buf[1024];
@@ -242,13 +278,14 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
                 "=== CRASH ===\r\nReason=%s Code=0x%08X Target=%p\r\nEIP:\r\n", reason, code, targetAddr);
             DWORD written;
             WriteFile(hFile, buf, (DWORD)ClampSnprintf(len, (int)sizeof(buf)), &written, NULL);
+            FlushFileBuffers(hFile);
             CloseHandle(hFile);
 
-            LogAddr(excAddr);
+            LogAddr(excAddr, hSnap);
 
-            // EBP Chain Stack Trace (reads guarded with VirtualQuery so a nested fault
+            // EBP Chain Stack Trace (reads guarded with VirtualQuery + __try/__except so a nested fault
             // inside the handler cannot raise a second, uncaught access violation)
-            DWORD *ebp = (DWORD*)pExceptionInfo->ContextRecord->Ebp;
+            DWORD *ebp = (DWORD*)(uintptr_t)pExceptionInfo->ContextRecord->Ebp;
             {
                 PEXCEPTION_RECORD er = pExceptionInfo->ExceptionRecord;
                 char rbuf[1024];
@@ -263,42 +300,53 @@ static LONG WINAPI Tier0_VectoredHandler( EXCEPTION_POINTERS *pExceptionInfo )
                     (er->NumberParameters > 1) ? (DWORD)er->ExceptionInformation[1] : 0);
                 WriteLog(rbuf, ClampSnprintf(rlen, (int)sizeof(rbuf)));
                 hFile = CreateFileA(GetCrashLogPath(),
-                    FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                    FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
                 if (hFile != INVALID_HANDLE_VALUE)
                 {
                     DWORD w2;
                     WriteFile(hFile, "EBP chain:\r\n", 12, &w2, NULL);
+                    FlushFileBuffers(hFile);
                     CloseHandle(hFile);
                 }
             }
             hFile = CreateFileA(GetCrashLogPath(),
-                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
             if (hFile != INVALID_HANDLE_VALUE) {
                 DWORD w2;
                 WriteFile(hFile, "Stack:\r\n", 8, &w2, NULL);
+                FlushFileBuffers(hFile);
                 CloseHandle(hFile);
             }
             MEMORY_BASIC_INFORMATION mbi;
             for (int i = 0; i < 20; i++) {
-                if ((DWORD)ebp < 0x10000 || (DWORD)ebp > 0x7FFFFFFF) break;
-                if (VirtualQuery((LPCVOID)ebp, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
-                if( !IsReadableMemory( mbi, ( const BYTE * )ebp, sizeof( DWORD ) * 2 ) ) break;
-                DWORD retAddr = ebp[1];
+                uintptr_t cur = (uintptr_t)ebp;
+                if (cur < 0x10000 || cur > 0xFFFFFFF0) break;
+                if (VirtualQuery((LPCVOID)cur, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+                if( !IsReadableMemory( mbi, ( const BYTE * )cur, sizeof( DWORD ) * 2 ) ) break;
+                DWORD retAddr = 0;
+                DWORD nextEbpRaw = 0;
+                __try { retAddr = ebp[1]; nextEbpRaw = ebp[0]; } __except(EXCEPTION_EXECUTE_HANDLER) { break; }
                 if (retAddr == 0) break;
-                LogAddr((void*)retAddr);
-                ebp = (DWORD*)ebp[0];
+                LogAddr((void*)(uintptr_t)retAddr, hSnap);
+                uintptr_t next = (uintptr_t)nextEbpRaw;
+                if (next <= cur || next - cur > 0x10000) break;
+                ebp = (DWORD*)next;
             }
 
-            LogStackSweep(pExceptionInfo->ContextRecord->Esp);
+            LogStackSweep(pExceptionInfo->ContextRecord->Esp, hSnap);
 
             hFile = CreateFileA(GetCrashLogPath(),
-                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
             if (hFile != INVALID_HANDLE_VALUE) {
                 DWORD w3;
                 WriteFile(hFile, "=== END ===\r\n\r\n", 15, &w3, NULL);
+                FlushFileBuffers(hFile);
                 CloseHandle(hFile);
             }
         }
+
+        if (hSnap != INVALID_HANDLE_VALUE && hSnap != NULL)
+            CloseHandle(hSnap);
 
         WriteMiniDumpForException(code, pExceptionInfo);
         InterlockedExchange( &g_CrashInProgress, 0 );
@@ -318,17 +366,25 @@ extern "C" BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvR
 		DisableThreadLibraryCalls( hinstDLL );
 
 		// Pin DLL in memory (chromehtml.dll may FreeLibrary us)
-		HMODULE hPinned;
-		GetModuleHandleExA(
+		HMODULE hPinned = NULL;
+		if ( !GetModuleHandleExA(
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
 			(LPCSTR)DllMain,
-			&hPinned );
+			&hPinned ) )
+		{
+			// Pinning failed — still continue, handler will be removed on detach if installed
+		}
 
 		// Install vectored exception handler for crash logging
-		AddVectoredExceptionHandler( 1, Tier0_VectoredHandler );
+		g_hVeh = AddVectoredExceptionHandler( 1, Tier0_VectoredHandler );
 	}
 	else if ( fdwReason == DLL_PROCESS_DETACH )
 	{
+		if ( g_hVeh )
+		{
+			RemoveVectoredExceptionHandler( g_hVeh );
+			g_hVeh = nullptr;
+		}
 		// Release the process-wide high-resolution timer raised by PreciseSleep
 		// so the global timer resolution is not left elevated after we unload.
 		Tier0ShutdownHighResTimer();

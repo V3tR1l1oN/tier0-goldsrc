@@ -9,6 +9,10 @@
 #include <malloc.h>
 #include <process.h>
 #include <stdlib.h>
+#include <atomic>
+#include <cerrno>
+#include <cstdint>
+#include <climits>
 
 #ifdef WIN32
 #include "winlite.h"
@@ -71,7 +75,7 @@ namespace
 		CRITICAL_SECTION cs;
 		HANDLE hPrepage;
 		HANDLE hWake;
-		volatile long stop;
+		std::atomic<long> stop;
 
 		SBArena()
 			: base( NULL ), reserve( 0 ), commitEnd( 0 ), handout( 0 ), touched( 0 ),
@@ -85,7 +89,7 @@ namespace
 		{
 			if ( hPrepage )
 			{
-				InterlockedExchange( &stop, 1 );
+				stop.store( 1, std::memory_order_release );
 				if ( hWake )
 					SetEvent( hWake );
 
@@ -112,7 +116,7 @@ namespace
 
 	static SBArena g_arena;
 	// 0=uninitialized, 1=initializing, 2=ready, 3=disabled/failed.
-	static volatile long g_arenaState = 0;
+	static std::atomic<long> g_arenaState{0};
 
 	static unsigned __stdcall SBArena_PrepageThread( void * )
 	{
@@ -120,7 +124,7 @@ namespace
 
 		for ( ;; )
 		{
-			if ( g_arena.stop )
+			if ( g_arena.stop.load( std::memory_order_acquire ) )
 				break;
 
 			EnterCriticalSection( &g_arena.cs );
@@ -155,27 +159,55 @@ namespace
 				continue;
 			}
 
-			// Commit ahead of the touch in 1 MB slices, then touch under the
-			// lock so the slice never overlaps a page handed out meanwhile.
+			// Reserve a 1 MB slice under the lock, then release the lock before
+			// the slow VirtualAlloc / page-touch syscalls.
 			size_t grow = want < ( 1u << 20 ) ? want : ( 1u << 20 );
 			size_t off = g_arena.touched;
+			size_t add = 0;
+			size_t commitBase = g_arena.commitEnd;
 			if ( g_arena.commitEnd < off + grow )
 			{
-				size_t add = off + grow - g_arena.commitEnd;
+				add = off + grow - g_arena.commitEnd;
 				if ( g_arena.commitEnd + add > g_arena.reserve )
 					add = g_arena.reserve - g_arena.commitEnd;
-				if ( add && !VirtualAlloc( g_arena.base + g_arena.commitEnd, add,
-						MEM_COMMIT, PAGE_READWRITE ) )
-					add = 0;
+				// Reserve commit range under the lock so no other thread overlaps.
 				g_arena.commitEnd += add;
-				if ( add == 0 )
-					grow = 0;
 			}
-			if ( grow )
+			// Reserve touched range as well - advance touched optimistically
+			// so concurrent allocators see it as reserved; rollback on failure.
+			// Keep original off for touch; touched already reserved below.
+			LeaveCriticalSection( &g_arena.cs );
+
+			bool commitOk = true;
+			if ( add )
+			{
+				if ( !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
+					commitOk = false;
+			}
+			if ( commitOk && grow )
 			{
 				for ( size_t p = off; p < off + grow; p += 4096 )
 					*( volatile unsigned char * )( g_arena.base + p ) = 0;
-				g_arena.touched = off + grow;
+			}
+
+			EnterCriticalSection( &g_arena.cs );
+			if ( !commitOk )
+			{
+				// Roll back the commit reservation; touched stays where it was.
+				g_arena.commitEnd = commitBase;
+				grow = 0;
+			}
+			else if ( grow )
+			{
+				// Publish touched only after successful touch.
+				// off+grow is still the expected frontier; if another thread
+				// advanced touched concurrently, keep the max.
+				if ( g_arena.touched < off + grow )
+					g_arena.touched = off + grow;
+			}
+			else
+			{
+				// grow was 0 already
 			}
 			LeaveCriticalSection( &g_arena.cs );
 
@@ -192,23 +224,35 @@ namespace
 
 	static bool SBArena_Start()     // one-shot; may be called from any thread, not under any lock
 	{
-		LONG state = InterlockedCompareExchange( &g_arenaState, 0, 0 );
+		long state = g_arenaState.load( std::memory_order_acquire );
 		if ( state == 2 )
 			return true;
 		if ( state == 3 )
 			return false;
 
-		if ( InterlockedCompareExchange( &g_arenaState, 1, 0 ) != 0 )
+		long expected = 0;
+		if ( !g_arenaState.compare_exchange_strong( expected, 1, std::memory_order_acq_rel ) )
 		{
-			while ( ( state = InterlockedCompareExchange( &g_arenaState, 0, 0 ) ) == 1 )
+			while ( ( state = g_arenaState.load( std::memory_order_acquire ) ) == 1 )
 				Sleep( 0 );
 			return state == 2;
 		}
 
+		auto parseEnvULong = []( const char *s, unsigned long *out ) -> bool {
+			if ( !s || !*s ) return false;
+			char *end = nullptr;
+			errno = 0;
+			unsigned long v = strtoul( s, &end, 10 );
+			if ( errno != 0 || end == s || *end != '\0' )
+				return false;
+			*out = v;
+			return true;
+		};
+
 		const char *pOff = getenv( "SBA_ARENA" );
 		if ( pOff && pOff[ 0 ] == '0' )
 		{
-			InterlockedExchange( &g_arenaState, 3 );
+			g_arenaState.store( 3, std::memory_order_release );
 			return false;
 		}
 
@@ -216,16 +260,16 @@ namespace
 		const char *pRes = getenv( "SBA_RESERVE_MB" );
 		if ( pRes )
 		{
-			unsigned v = ( unsigned )atoi( pRes );
-			if ( v >= 16 && v <= 1024 )
-				reserveMB = v;
+			unsigned long v = 0;
+			if ( parseEnvULong( pRes, &v ) && v >= 16 && v <= 1024 )
+				reserveMB = (unsigned)v;
 		}
 
 		unsigned char *b = ( unsigned char * )VirtualAlloc( NULL,
 			(size_t)reserveMB << 20, MEM_RESERVE, PAGE_READWRITE );
 		if ( !b )
 		{
-			InterlockedExchange( &g_arenaState, 3 );
+			g_arenaState.store( 3, std::memory_order_release );
 			return false;
 		}
 
@@ -244,9 +288,9 @@ namespace
 		const char *pTgt = getenv( "SBA_ARENA_MB" );
 		if ( pTgt )
 		{
-			unsigned v = ( unsigned )atoi( pTgt );
-			if ( v >= 1 && v <= 1024 )
-				targetMB = v;
+			unsigned long v = 0;
+			if ( parseEnvULong( pTgt, &v ) && v >= 1 && v <= 1024 )
+				targetMB = (size_t)v;
 		}
 
 		g_arena.base = b;
@@ -263,22 +307,22 @@ namespace
 		if ( !g_arena.hPrepage )
 			g_arena.hPrepage = NULL;
 
-		InterlockedExchange( &g_arenaState, 2 );
+		g_arenaState.store( 2, std::memory_order_release );
 		return true;
 	}
 
 	static bool SBArena_Stop()
 	{
-		LONG state = InterlockedCompareExchange( &g_arenaState, 0, 0 );
+		long state = g_arenaState.load( std::memory_order_acquire );
 		if ( state != 2 )
 			return true;
 
-		InterlockedExchange( &g_arena.stop, 1 );
+		g_arena.stop.store( 1, std::memory_order_release );
 		if ( g_arena.hWake )
 			SetEvent( g_arena.hWake );
 		if ( !g_arena.hPrepage )
 		{
-			InterlockedExchange( &g_arenaState, 3 );
+			g_arenaState.store( 3, std::memory_order_release );
 			return true;
 		}
 
@@ -287,70 +331,113 @@ namespace
 
 		CloseHandle( g_arena.hPrepage );
 		g_arena.hPrepage = NULL;
-		InterlockedExchange( &g_arenaState, 3 );
+		g_arenaState.store( 3, std::memory_order_release );
 		return true;
 	}
 
 	static void *SBArena_Alloc( size_t bytes )     // 4096 or 8192
 	{
 		unsigned char *p = NULL;
+		if ( !g_arena.base )
+			return ( unsigned char * )malloc( bytes );
 
-		if ( g_arena.base )
+		size_t need = ( bytes <= SBA_ARENA_4K ) ? SBA_ARENA_4K : SBA_ARENA_8K;
+		bool fromHandout = false;
+		size_t savedHandout = 0;
+		size_t off = 0;
+		size_t add = 0;
+		size_t commitBase = 0;
+
+		EnterCriticalSection( &g_arena.cs );
+
+		if ( bytes <= SBA_ARENA_4K )
 		{
-			EnterCriticalSection( &g_arena.cs );
+			if ( g_arena.fl4k ) { p = ( unsigned char * )g_arena.fl4k; g_arena.fl4k = *( void ** )p; }
+		}
+		else
+		{
+			if ( g_arena.fl8k ) { p = ( unsigned char * )g_arena.fl8k; g_arena.fl8k = *( void ** )p; }
+		}
 
-			if ( bytes <= SBA_ARENA_4K )
+		if ( !p )
+		{
+			if ( g_arena.handout + need <= g_arena.reserve )
 			{
-				if ( g_arena.fl4k ) { p = ( unsigned char * )g_arena.fl4k; g_arena.fl4k = *( void ** )p; }
+				savedHandout = g_arena.handout;
+				p = g_arena.base + g_arena.handout;
+				g_arena.handout += need;
+				fromHandout = true;
+			}
+		}
+
+		// Keep a warm cushion ahead of handout: when the engine allocates
+		// faster than the prefault thread (map/resource load bursts), raise
+		// the prefault target adaptively so warm pages keep arriving ahead
+		// of the burst (capped at the reservation).
+		if ( g_arena.touched < g_arena.handout + ( 8u << 20 ) &&
+			 g_arena.target < g_arena.reserve )
+		{
+			size_t want = g_arena.handout + ( 16u << 20 );
+			g_arena.target = want < g_arena.reserve ? want : g_arena.reserve;
+		}
+
+		if ( p )
+		{
+			off = ( size_t )( p - g_arena.base );
+			if ( off + need > g_arena.commitEnd )
+			{
+				add = off + need - g_arena.commitEnd;
+				add = ( add + 0xFFFFF ) & ~( size_t )0xFFFFF;   // 1 MB granularity
+				if ( g_arena.commitEnd + add > g_arena.reserve )
+					add = g_arena.reserve - g_arena.commitEnd;
+				commitBase = g_arena.commitEnd;
+				// Reserve commit range will be published after successful VirtualAlloc outside lock.
+				// Do NOT advance commitEnd yet.
+				if ( add == 0 )
+				{
+					// Reserve exhausted - cannot commit, treat as failure
+					// p will be rolled back below
+				}
+			}
+		}
+
+		LeaveCriticalSection( &g_arena.cs );
+
+		if ( p && add )
+		{
+			if ( add == 0 || !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
+			{
+				// Roll back handout on failure (VA leak fix)
+				EnterCriticalSection( &g_arena.cs );
+				if ( fromHandout )
+				{
+					// Only rollback if we are still at the frontier; otherwise
+					// another thread has already allocated beyond us - keep
+					// handout to avoid discarding their reservation.
+					if ( g_arena.handout == savedHandout + need )
+						g_arena.handout = savedHandout;
+					// else leak the VA range but keep correctness (rare race)
+				}
+				LeaveCriticalSection( &g_arena.cs );
+				p = NULL;
 			}
 			else
 			{
-				if ( g_arena.fl8k ) { p = ( unsigned char * )g_arena.fl8k; g_arena.fl8k = *( void ** )p; }
+				EnterCriticalSection( &g_arena.cs );
+				// Publish commit; handle concurrent commit advances by taking max
+				if ( g_arena.commitEnd < commitBase + add )
+					g_arena.commitEnd = commitBase + add;
+				LeaveCriticalSection( &g_arena.cs );
 			}
-
-			if ( !p )
-			{
-				size_t need = ( bytes <= SBA_ARENA_4K ) ? SBA_ARENA_4K : SBA_ARENA_8K;
-				if ( g_arena.handout + need <= g_arena.reserve )
-				{
-					p = g_arena.base + g_arena.handout;
-					g_arena.handout += need;
-				}
-			}
-
-			// Keep a warm cushion ahead of handout: when the engine allocates
-			// faster than the prefault thread (map/resource load bursts), raise
-			// the prefault target adaptively so warm pages keep arriving ahead
-			// of the burst (capped at the reservation).
-			if ( g_arena.touched < g_arena.handout + ( 8u << 20 ) &&
-				 g_arena.target < g_arena.reserve )
-			{
-				size_t want = g_arena.handout + ( 16u << 20 );
-				g_arena.target = want < g_arena.reserve ? want : g_arena.reserve;
-			}
-
-			if ( p )
-			{
-				size_t off = ( size_t )( p - g_arena.base );
-				if ( off + bytes > g_arena.commitEnd )
-				{
-					size_t add = off + bytes - g_arena.commitEnd;
-					add = ( add + 0xFFFFF ) & ~( size_t )0xFFFFF;   // 1 MB granularity
-					if ( g_arena.commitEnd + add > g_arena.reserve )
-						add = g_arena.reserve - g_arena.commitEnd;
-					if ( !VirtualAlloc( g_arena.base + g_arena.commitEnd, add,
-							MEM_COMMIT, PAGE_READWRITE ) )
-					{
-						// Rare out-of-RAM case: drop the fresh chunk (never touch
-						// its uncommitted pages) and fall back to the CRT heap.
-						p = NULL;
-					}
-					else
-						g_arena.commitEnd += add;
-				}
-			}
-
+		}
+		else if ( p && off + need > commitBase + add && add == 0 )
+		{
+			// No commit space left - rollback handout
+			EnterCriticalSection( &g_arena.cs );
+			if ( fromHandout && g_arena.handout == savedHandout + need )
+				g_arena.handout = savedHandout;
 			LeaveCriticalSection( &g_arena.cs );
+			p = NULL;
 		}
 
 		return p ? p : ( unsigned char * )malloc( bytes );
@@ -1029,6 +1116,8 @@ struct SBASlab
 
 	static void* AllocSBA( size_t nSize )
 	{
+		if ( !g_sbaReady )
+			return nullptr;
 		unsigned bucket = g_SBA.m_bucketOf[ nSize ];
 
 		TLSFreeBucket &c = g_tlCaches.b[ bucket ];
@@ -1066,6 +1155,8 @@ struct SBASlab
 
 	static void TLSFree( unsigned bucket, void *p )
 	{
+		if ( !g_sbaReady )
+			return;
 		TLSFreeBucket &c = g_tlCaches.b[ bucket ];
 		*( void ** )p = c.head;
 		c.head = p;
@@ -1424,6 +1515,8 @@ static bool IsAccessibleSpan( const void* pMem, size_t size, int bWrite )
 	// that [pMem, pMem+size) is committed and carries the requested access.
 	// VirtualQuery on a junk pointer fails safely, so this never faults.
 	if ( !pMem )
+		return false;
+	if ( size > (size_t)( ~(size_t)0 - (size_t)pMem ) )
 		return false;
 
 	MEMORY_BASIC_INFORMATION mbi;

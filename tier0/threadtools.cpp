@@ -73,7 +73,7 @@ int64 ThreadInterlockedEmu_CompareExchange64( int64 volatile *pDest, int64 value
 int64 ThreadInterlockedEmu_Increment64( volatile int64 *pDest )
 {
 	int64 Old;
-	do { Old = *pDest; }
+	do { Old = ThreadInterlockedEmu_CompareExchange64( pDest, 0, 0 ); }
 	while ( ThreadInterlockedEmu_CompareExchange64( pDest, Old + 1, Old ) != Old );
 	return Old + 1;
 }
@@ -81,7 +81,7 @@ int64 ThreadInterlockedEmu_Increment64( volatile int64 *pDest )
 int64 ThreadInterlockedEmu_Decrement64( volatile int64 *pDest )
 {
 	int64 Old;
-	do { Old = *pDest; }
+	do { Old = ThreadInterlockedEmu_CompareExchange64( pDest, 0, 0 ); }
 	while ( ThreadInterlockedEmu_CompareExchange64( pDest, Old - 1, Old ) != Old );
 	return Old - 1;
 }
@@ -89,7 +89,7 @@ int64 ThreadInterlockedEmu_Decrement64( volatile int64 *pDest )
 int64 ThreadInterlockedEmu_Exchange64( volatile int64 *pDest, int64 value )
 {
 	int64 Old;
-	do { Old = *pDest; }
+	do { Old = ThreadInterlockedEmu_CompareExchange64( pDest, 0, 0 ); }
 	while ( ThreadInterlockedEmu_CompareExchange64( pDest, value, Old ) != Old );
 	return Old;
 }
@@ -97,7 +97,7 @@ int64 ThreadInterlockedEmu_Exchange64( volatile int64 *pDest, int64 value )
 int64 ThreadInterlockedEmu_ExchangeAdd64( volatile int64 *pDest, int64 value )
 {
 	int64 Old;
-	do { Old = *pDest; }
+	do { Old = ThreadInterlockedEmu_CompareExchange64( pDest, 0, 0 ); }
 	while ( ThreadInterlockedEmu_CompareExchange64( pDest, Old + value, Old ) != Old );
 	return Old;
 }
@@ -127,8 +127,9 @@ bool BPreciseSleepEnabled()
 	{
 		if( InterlockedCompareExchange( &s_mode, -2, -1 ) == -1 )
 		{
-			const char *psz = getenv( "TIER0_PRECISE_SLEEP" );
-			InterlockedExchange( &s_mode, ( psz && psz[ 0 ] == '0' ) ? 0 : 1 );
+			char buf[ 8 ] = { 0 };
+			DWORD len = GetEnvironmentVariableA( "TIER0_PRECISE_SLEEP", buf, sizeof( buf ) );
+			InterlockedExchange( &s_mode, ( len && buf[ 0 ] == '0' ) ? 0 : 1 );
 		}
 		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
 	}
@@ -177,8 +178,9 @@ static bool BHighResTimerEnabled()
 	{
 		if( InterlockedCompareExchange( &s_mode, -2, -1 ) == -1 )
 		{
-			const char *psz = getenv( "TIER0_HIGHRES_TIMER" );
-			InterlockedExchange( &s_mode, ( psz && psz[ 0 ] == '0' ) ? 0 : 1 );
+			char buf[ 8 ] = { 0 };
+			DWORD len = GetEnvironmentVariableA( "TIER0_HIGHRES_TIMER", buf, sizeof( buf ) );
+			InterlockedExchange( &s_mode, ( len && buf[ 0 ] == '0' ) ? 0 : 1 );
 		}
 		mode = InterlockedCompareExchange( &s_mode, -1, -1 );
 	}
@@ -200,9 +202,32 @@ void Tier0ShutdownHighResTimer()
 	// Pair the raise. Only the thread that owns the raise (state 2) may release
 	// it; the CAS from 2 -> 4 claims that ownership exactly once, so a detach
 	// racing a late PreciseSleep caller can never release someone else's raise
-	// or release twice.
-	if( InterlockedCompareExchange( &s_HighResState, 4, 2 ) == 2 )
-		timeEndPeriod( 1 );
+	// or release twice. If state is 1 (raise in progress) wait briefly then
+	// release if it became 2; state 3 (failed) just resets to 4.
+	LONG s = InterlockedCompareExchange( &s_HighResState, 0, 0 );
+	if ( s == 2 )
+	{
+		if( InterlockedCompareExchange( &s_HighResState, 4, 2 ) == 2 )
+			timeEndPeriod( 1 );
+	}
+	else if ( s == 1 )
+	{
+		DWORD t0 = GetTickCount();
+		while ( ( s = InterlockedCompareExchange( &s_HighResState, 0, 0 ) ) == 1 )
+		{
+			if ( GetTickCount() - t0 > 100 )
+				break;
+			Sleep( 0 );
+		}
+		if( InterlockedCompareExchange( &s_HighResState, 4, 2 ) == 2 )
+			timeEndPeriod( 1 );
+		else if ( s == 3 )
+			InterlockedCompareExchange( &s_HighResState, 4, 3 );
+	}
+	else if ( s == 3 )
+	{
+		InterlockedCompareExchange( &s_HighResState, 4, 3 );
+	}
 }
 
 static void PreciseSleepRaiseTimer()
@@ -217,8 +242,18 @@ static void PreciseSleepRaiseTimer()
 	}
 	else
 	{
+		// If the thread that claimed 1 died, don't spin forever - timeout ~100ms then reset.
+		DWORD t0 = GetTickCount();
 		while( InterlockedCompareExchange( &s_HighResState, 0, 0 ) == 1 )
+		{
+			if ( GetTickCount() - t0 > 100 )
+			{
+				// Try to recover: if still 1, reset to 0 and let next caller retry.
+				InterlockedCompareExchange( &s_HighResState, 0, 1 );
+				break;
+			}
 			Sleep( 0 );
+		}
 	}
 }
 
@@ -254,11 +289,15 @@ void PreciseSleep( unsigned duration )
 	const double tStart = SlpNow();
 	::Sleep( duration > kSpinHeadroom + 1 ? duration - kSpinHeadroom : 1 );
 
+	const double spinLimit = target + 0.005; // +5ms cap against clock skew
 	for ( ;; )
 	{
-		if ( SlpNow() - tStart >= target )
+		double elapsed = SlpNow() - tStart;
+		if ( elapsed >= target || elapsed >= spinLimit || elapsed < -0.001 )
 			break;
 		_mm_pause();
+		if ( elapsed > 0.002 )
+			Sleep( 0 ); // yield after 2ms spin to avoid 100% CPU on clock jump
 	}
 }
 
@@ -344,10 +383,10 @@ int WaitForMultipleEvents( int nEvents, const void **pHandles, bool bWaitAll, un
 	if( nEvents <= 0 || pHandles == NULL )
 		return -1;
 
-	int count = MAXIMUM_WAIT_OBJECTS;
+	if ( nEvents > MAXIMUM_WAIT_OBJECTS )
+		return -1;
 
-	if ( nEvents < MAXIMUM_WAIT_OBJECTS )
-		count = nEvents;
+	int count = nEvents;
 
 	HANDLE handles[ MAXIMUM_WAIT_OBJECTS ];
 
@@ -382,8 +421,15 @@ struct SimpleThreadInit_t
 unsigned __stdcall SimpleThreadThreadProc( void *pvParam )
 {
 	SimpleThreadInit_t *pData = ( SimpleThreadInit_t * )pvParam;
-	const unsigned retVal = pData->pfnUserFunc( pData->pvParam );
-	delete pData;
+	unsigned retVal = 0;
+	__try
+	{
+		retVal = pData->pfnUserFunc( pData->pvParam );
+	}
+	__finally
+	{
+		delete pData;
+	}
 	return retVal;
 }
 
@@ -637,7 +683,8 @@ bool CThreadEvent::Pulse()
 {
 	AssertUseable();
 
-	return PulseEvent( m_hSyncObject ) != 0;
+	// PulseEvent is unreliable (loses signal if no waiter). Use Set for correctness.
+	return SetEvent( m_hSyncObject ) != 0;
 }
 
 bool CThreadEvent::Check()
@@ -657,16 +704,18 @@ CThreadFastMutex::CThreadFastMutex()
 
 CThreadFastMutex::CThreadFastMutex( const CThreadFastMutex& other )
 {
-	m_nOwnership = other.m_nOwnership;
-	m_nCount = other.m_nCount;
+	UNREFERENCED_PARAMETER( other );
+	m_nOwnership = 0;
+	m_nCount = 0;
 }
 
 CThreadFastMutex& CThreadFastMutex::operator=( const CThreadFastMutex& other )
 {
+	UNREFERENCED_PARAMETER( other );
 	if ( this != &other )
 	{
-		m_nOwnership = other.m_nOwnership;
-		m_nCount = other.m_nCount;
+		m_nOwnership = 0;
+		m_nCount = 0;
 	}
 
 	return *this;

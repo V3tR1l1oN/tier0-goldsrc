@@ -73,10 +73,124 @@ static int s_DefaultLevel = 0;
 static int s_DefaultLogLevel = 0;
 
 static SpewGroup_t* s_pSpewGroups = nullptr;
+static CThreadMutex s_SpewGroupsMutex;
 
-static const char* s_pFileName = nullptr;
-static int s_Line = 0;
-static SpewType_t s_SpewType = SPEW_MESSAGE;
+static thread_local const char* s_pFileName = nullptr;
+static thread_local int s_Line = 0;
+static thread_local SpewType_t s_SpewType = SPEW_MESSAGE;
+
+// --- VirtualQuery based pointer validation (replaces banned APIs) ---
+static bool IsReadableMemory( const void* ptr, SIZE_T size )
+{
+	if ( !ptr || size == 0 )
+		return size == 0 && ptr != nullptr; // zero-size check considered valid if ptr non-null; caller handles count==0 separately
+	if ( size > 0x7fffffff )
+		return false;
+	const BYTE* addr = (const BYTE*)ptr;
+	const BYTE* end = addr + size;
+	MEMORY_BASIC_INFORMATION mbi;
+	while ( addr < end )
+	{
+		if ( VirtualQuery( addr, &mbi, sizeof( mbi ) ) != sizeof( mbi ) )
+			return false;
+		if ( mbi.State != MEM_COMMIT )
+			return false;
+		if ( mbi.Protect & PAGE_GUARD )
+			return false;
+		if ( mbi.Protect & PAGE_NOACCESS )
+			return false;
+		DWORD protect = mbi.Protect & 0xFF;
+		bool readable = ( protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_WRITECOPY ||
+		                  protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY );
+		if ( !readable )
+			return false;
+		const BYTE* regionEnd = (const BYTE*)mbi.BaseAddress + mbi.RegionSize;
+		const BYTE* next = regionEnd < end ? regionEnd : end;
+		if ( next <= addr )
+			return false;
+		addr = next;
+	}
+	return true;
+}
+
+static bool IsWritableMemory( void* ptr, SIZE_T size )
+{
+	if ( !ptr || size == 0 )
+		return size == 0 && ptr != nullptr;
+	if ( size > 0x7fffffff )
+		return false;
+	const BYTE* addr = (const BYTE*)ptr;
+	const BYTE* end = addr + size;
+	MEMORY_BASIC_INFORMATION mbi;
+	while ( addr < end )
+	{
+		if ( VirtualQuery( addr, &mbi, sizeof( mbi ) ) != sizeof( mbi ) )
+			return false;
+		if ( mbi.State != MEM_COMMIT )
+			return false;
+		if ( mbi.Protect & PAGE_GUARD )
+			return false;
+		if ( mbi.Protect & PAGE_NOACCESS )
+			return false;
+		DWORD protect = mbi.Protect & 0xFF;
+		bool writable = ( protect == PAGE_READWRITE || protect == PAGE_WRITECOPY ||
+		                  protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY );
+		if ( !writable )
+			return false;
+		const BYTE* regionEnd = (const BYTE*)mbi.BaseAddress + mbi.RegionSize;
+		const BYTE* next = regionEnd < end ? regionEnd : end;
+		if ( next <= addr )
+			return false;
+		addr = next;
+	}
+	return true;
+}
+
+static bool IsValidStringPtrA( const char* ptr, SIZE_T maxChars )
+{
+	if ( !ptr )
+		return false;
+	if ( maxChars == 0 )
+		return true;
+	// Walk up to maxChars looking for NUL, validating readability page-by-page
+	const char* cur = ptr;
+	SIZE_T remaining = maxChars;
+	while ( remaining > 0 )
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+		if ( VirtualQuery( cur, &mbi, sizeof( mbi ) ) != sizeof( mbi ) )
+			return false;
+		if ( mbi.State != MEM_COMMIT || ( mbi.Protect & PAGE_GUARD ) || ( mbi.Protect & PAGE_NOACCESS ) )
+			return false;
+		DWORD protect = mbi.Protect & 0xFF;
+		bool readable = ( protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_WRITECOPY ||
+		                  protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY );
+		if ( !readable )
+			return false;
+		const char* regionEnd = (const char*)mbi.BaseAddress + mbi.RegionSize;
+		SIZE_T chunk = (SIZE_T)( regionEnd - cur );
+		if ( chunk > remaining )
+			chunk = remaining;
+		// scan for NUL within chunk
+		for ( SIZE_T i = 0; i < chunk; ++i )
+		{
+			__try
+			{
+				if ( cur[i] == '\0' )
+					return true;
+			}
+			__except ( EXCEPTION_EXECUTE_HANDLER )
+			{
+				return false;
+			}
+		}
+		cur += chunk;
+		remaining -= chunk;
+	}
+	// No terminating NUL found within maxChars => still considered valid for legacy semantics (checks readability only)
+	// but if memory was readable up to maxChars, return true
+	return true;
+}
 
 SpewRetval_t DefaultSpewFunc( SpewType_t type, const tchar* pMsg )
 {
@@ -165,11 +279,17 @@ void SpewAndLogActivate( const tchar *pGroupName, int level, int logLevel )
 	{
 		int index;
 
-SpewGroup_t* pGroup;
+		SpewGroup_t* pGroup;
 
-		if( FindSpewGroup( pGroupName, &index ) )
+		// Protect sorted array + realloc against concurrent SpewActivate
+		s_SpewGroupsMutex.Lock();
+		bool bFound = FindSpewGroup( pGroupName, &index );
+		if( bFound )
 		{
 			pGroup = &s_pSpewGroups[ index ];
+			pGroup->m_Level = level;
+			pGroup->m_LogLevel = logLevel;
+			s_SpewGroupsMutex.Unlock();
 		}
 		else
 		{
@@ -184,7 +304,10 @@ SpewGroup_t* pGroup;
 
 			SpewGroup_t *pNew = ( SpewGroup_t* ) realloc( s_pSpewGroups, sizeof( SpewGroup_t ) * ( s_GroupCount + 1 ) );
 			if( !pNew )
+			{
+				s_SpewGroupsMutex.Unlock();
 				return;
+			}
 			s_pSpewGroups = pNew;
 
 			if( index < s_GroupCount )
@@ -200,10 +323,11 @@ SpewGroup_t* pGroup;
 			_tcsncpy( pGroup->m_GroupName, pGroupName, ARRAYSIZE( pGroup->m_GroupName ) - 1 );
 			pGroup->m_GroupName[ ARRAYSIZE( pGroup->m_GroupName ) - 1 ] = _T( '\0' );
 			++s_GroupCount;
-		}
 
-		pGroup->m_Level = level;
-		pGroup->m_LogLevel = logLevel;
+			pGroup->m_Level = level;
+			pGroup->m_LogLevel = logLevel;
+			s_SpewGroupsMutex.Unlock();
+		}
 	}
 	else
 	{
@@ -288,13 +412,28 @@ void _SpewInfo( SpewType_t type, const tchar* pFile, int line )
 	s_SpewType = type;
 }
 
+// RAII wrapper for CThreadMutex
+class CAutoMutexLock
+{
+public:
+	explicit CAutoMutexLock( CThreadMutex &m ) : m_mutex( m ), m_locked( true ) { m_mutex.Lock(); }
+	~CAutoMutexLock() { if ( m_locked ) m_mutex.Unlock(); }
+	void Unlock() { if ( m_locked ) { m_mutex.Unlock(); m_locked = false; } }
+	bool IsLocked() const { return m_locked; }
+private:
+	CThreadMutex &m_mutex;
+	bool m_locked;
+	CAutoMutexLock( const CAutoMutexLock& ) = delete;
+	CAutoMutexLock& operator=( const CAutoMutexLock& ) = delete;
+};
+
 SpewRetval_t SpewMessageType( SpewType_t spewType, const tchar* pMsgFormat, va_list args )
 {
 	tchar pTempBuffer[ 5020 ];
 
 	static CThreadMutex autoMutex;
 
-	autoMutex.Lock();
+	CAutoMutexLock lock( autoMutex );
 
 	if( spewType == SPEW_ASSERT )
 		Test_SetFailed();
@@ -342,6 +481,9 @@ SpewRetval_t SpewMessageType( SpewType_t spewType, const tchar* pMsgFormat, va_l
 
 	SpewRetval_t retval = s_SpewOutputFunc( spewType, pTempBuffer );
 
+	// Do not hold lock across debugbreak/exit - release RAII lock now
+	lock.Unlock();
+
 	if( retval != SPEW_DEBUGGER )
 	{
 		if( retval == SPEW_ABORT )
@@ -354,8 +496,6 @@ SpewRetval_t SpewMessageType( SpewType_t spewType, const tchar* pMsgFormat, va_l
 	{
 		__debugbreak();
 	}
-
-	autoMutex.Unlock();
 
 	return retval;
 }
@@ -546,15 +686,14 @@ void Error( tchar const* pMsg, ... )
 }
 
 // Original tier0.dll (exports @295-298) returns `bool` and gates every helper on
-// IsBadReadPtr/IsBadWritePtr/IsBadStringPtrA before running the assert machinery:
-//   10002829 call ds:IsBadReadPtr; test eax,eax; je return     <- valid -> return true
-//   10002837 call IsInAssert; test al,al; jne return            <- in assert -> return false
-//   10002848 call SetInAssert(1); ... assert path ...           <- show assert, return false
+// VirtualQuery+IsReadableMemory before running the assert machinery
+// (replacing deprecated APIs that are racy and trigger false positives).
 // We mirror that exactly; DoNewAssertDialog is non-blocking in this build.
 
 bool _AssertValidReadPtr( void* ptr, int count )
 {
-	if ( !IsBadReadPtr( ptr, ( UINT )count ) )
+	bool bValid = ( count == 0 ) ? ( ptr != nullptr ) : IsReadableMemory( ptr, (SIZE_T)count );
+	if ( bValid )
 		return true;
 
 	if ( IsInAssert() )
@@ -573,7 +712,8 @@ bool _AssertValidReadPtr( void* ptr, int count )
 
 bool _AssertValidWritePtr( void* ptr, int count )
 {
-	if ( !IsBadWritePtr( ptr, ( UINT )count ) )
+	bool bValid = ( count == 0 ) ? ( ptr != nullptr ) : IsWritableMemory( ptr, (SIZE_T)count );
+	if ( bValid )
 		return true;
 
 	if ( IsInAssert() )
@@ -593,7 +733,12 @@ bool _AssertValidWritePtr( void* ptr, int count )
 bool _AssertValidReadWritePtr( void* ptr, int count )
 {
 	// Original: checks WRITE first, then READ (1000293D/10002949).
-	if ( !IsBadWritePtr( ptr, ( UINT )count ) && !IsBadReadPtr( ptr, ( UINT )count ) )
+	bool bValid = false;
+	if ( count == 0 )
+		bValid = ( ptr != nullptr );
+	else
+		bValid = IsWritableMemory( ptr, (SIZE_T)count ) && IsReadableMemory( ptr, (SIZE_T)count );
+	if ( bValid )
 		return true;
 
 	if ( IsInAssert() )
@@ -612,8 +757,9 @@ bool _AssertValidReadWritePtr( void* ptr, int count )
 
 bool AssertValidStringPtr( const tchar* ptr, int maxchar )
 {
-	// Original uses IsBadStringPtrA (1001003C), i.e. ANSI strings even on wide builds.
-	if ( !IsBadStringPtrA( ( LPCSTR )ptr, ( UINT )maxchar ) )
+	// Original uses ANSI string check (1001003C), i.e. ANSI strings even on wide builds.
+	bool bValid = IsValidStringPtrA( (LPCSTR)ptr, (SIZE_T)maxchar );
+	if ( bValid )
 		return true;
 
 	if ( IsInAssert() )
