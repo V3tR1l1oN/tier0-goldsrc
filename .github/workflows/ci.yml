@@ -130,3 +130,53 @@ jobs:
           & tests\bench.exe | Out-File -FilePath bench.out -Encoding utf8
           if ($LASTEXITCODE -ne 0) { Write-Error "bench failed: $LASTEXITCODE" }
           Select-String -Path bench.out -Pattern 'bench done' | ForEach-Object { $_.Line }
+
+  asan:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: x86 MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build tier0.dll with ASan (MSVC /fsanitize=address)
+        shell: cmd
+        run: |
+          set CL=/fsanitize=address
+          set _CL_=/fsanitize=address
+          call build.bat
+
+      - name: Verify ASan DLL exports
+        shell: cmd
+        run: |
+          dumpbin /EXPORTS build\tier0.dll > build\exports.txt
+          powershell -NoProfile -Command "if (-not (Select-String -Path build\exports.txt -Pattern '^\s*313 number of functions\s*$')) { Write-Error 'export count != 313'; exit 1 }"
+
+      - name: Build test harnesses
+        shell: cmd
+        run: tests\build_tests.bat
+
+      - name: Run test suite under ASan
+        shell: pwsh
+        run: |
+          Copy-Item build\tier0.dll tests\tier0.dll -Force
+          $env:ASAN_OPTIONS = 'detect_leaks=0:halt_on_error=1'
+          $procs = @(
+            @{ n = 'test_mem';       e = 0 },
+            @{ n = 'test_sba_stress'; e = 0 },
+            @{ n = 'test_regress';   e = 0 },
+            @{ n = 'test_threadtools'; e = 0 },
+            @{ n = 'test_sba_shutdown'; e = 0 }
+          )
+          foreach ($t in $procs) {
+            Write-Host "ASan: $($t.n)"
+            & "tests\$($t.n).exe" *> $null
+            if ($LASTEXITCODE -ne $t.e) {
+              Write-Error "ASan $($t.n) failed: exit=$LASTEXITCODE"
+            } else {
+              Write-Host "ASan $($t.n): OK"
+            }
+          }
