@@ -97,18 +97,23 @@ jobs:
       - name: Crash-log smoke (test_crash crashes on purpose, TIER0_MD=1 writes .mdmp)
         shell: pwsh
         run: |
-          # test_crash raises 0xC0000374 heap corruption; run inside tests/ so
-          # crash.log (module dir) and the .mdmp (process CWD) land together.
+          # 'b' raises a BREAKPOINT (0x80000003) instead of the default heap
+          # corruption (0xC0000374). Artificial 0xC0000374 can take the runtime's
+          # fail-fast path and terminate without dispatching to tier0's vectored
+          # handler on newer Windows; a BREAKPOINT reliably reaches it on all
+          # versions, so the same crash.log + .mdmp write path is exercised.
+          # Run inside tests/ so crash.log (module dir) and .mdmp (process CWD)
+          # land together.
           Push-Location tests
           $env:TIER0_MD = '1'
-          & .\test_crash.exe *> $null
+          & .\test_crash.exe b *> $null
           $code = $LASTEXITCODE
           Remove-Item Env:TIER0_MD
           if ($code -eq 0) { Write-Error "test_crash did not crash"; Pop-Location; exit 1 }
           $log = Get-Content .\crash.log -Raw -ErrorAction Stop
           if ($log -notmatch '=== CRASH ===') { Write-Error "crash.log has no crash record"; Pop-Location; exit 1 }
-          $md = Get-ChildItem -Filter *.mdmp -ErrorAction Stop
-          if ($md.Count -eq 0) { Write-Error "TIER0_MD=1 produced no .mdmp"; Pop-Location; exit 1 }
+          $md = Get-ChildItem -Filter *.mdmp -ErrorAction Stop | Where-Object { $_.Name -notlike '(failed)*' }
+          if ($md.Count -eq 0) { Write-Error "TIER0_MD=1 produced no valid .mdmp"; Pop-Location; exit 1 }
           Write-Host "crash code=$code, $(($log.Length))B crash.log, mdmp=$($md[0].Name)"
           Remove-Item .\crash.log, $md.FullName -ErrorAction SilentlyContinue
           Pop-Location
