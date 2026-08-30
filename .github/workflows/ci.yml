@@ -105,29 +105,24 @@ jobs:
           # Run inside tests/ so crash.log (module dir) and .mdmp (process CWD)
           # land together.
           Push-Location tests
-          Get-ChildItem -Force | Write-Host
           $env:TIER0_MD = '1'
-          & .\test_crash.exe b 2>&1 | ForEach-Object { Write-Host $_ }
+          # The whole point of this step is that test_crash.exe dies on purpose, so
+          # $LASTEXITCODE is nonzero (0x80000003). GitHub's pwsh runner decides the
+          # step's result from $LASTEXITCODE, so clear it after capturing $code or the
+          # step is marked failed even when every assertion below passes.
+          & .\test_crash.exe b *> $null
           $code = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
           Remove-Item Env:TIER0_MD
-          Write-Host "test_crash exit code = $code (0x$('{0:X8}' -f ($code -band 0xFFFFFFFF)))"
           if ($code -eq 0) { Write-Error "test_crash did not crash"; Pop-Location; exit 1 }
-          $crashLog = Join-Path $PWD 'crash.log'
-          Write-Host "crash.log exists = $(Test-Path $crashLog) at $crashLog"
-          if (Test-Path $crashLog) {
-            Write-Host '----- crash.log content -----'
-            Get-Content $crashLog
-            Write-Host '----- end crash.log -----'
-          }
-          $log = if (Test-Path $crashLog) { Get-Content $crashLog -Raw } else { '' }
+          $log = Get-Content .\crash.log -Raw -ErrorAction Stop
           if ($log -notmatch '=== CRASH ===') { Write-Error "crash.log has no crash record"; Pop-Location; exit 1 }
-          Write-Host "----- files in tests/ -----"
-          Get-ChildItem -Filter *.mdmp | ForEach-Object { Write-Host $_.Name }
           $md = Get-ChildItem -Filter *.mdmp -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '(failed)*' }
           if ($md.Count -eq 0) { Write-Error "TIER0_MD=1 produced no valid .mdmp"; Pop-Location; exit 1 }
-          Write-Host "crash code=$code, $(($log.Length))B crash.log, mdmp=$($md[0].Name)"
+          Write-Host "crash code=$code (0x$('{0:X8}' -f ($code -band 0xFFFFFFFF))), $(($log.Length))B crash.log, mdmp=$($md[0].Name)"
           Remove-Item .\crash.log, $md.FullName -ErrorAction SilentlyContinue
           Pop-Location
+          exit 0
 
       - name: Benchmark smoke
         shell: pwsh
