@@ -165,6 +165,19 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   проверка поддерживаемых CPUID-листьев, affinity-aware fallback для topology,
   защита crash-handler от повторного входа и проверка читаемости памяти при
   обходе стека. Добавлены `test_threadtools` и расширен CI fallback/crash smoke.
+- **v1.7.0** — полный аудит и массовые фиксы без смены ABI (313 экспортов):
+  VEH теперь хранит хендл и снимается в `DLL_PROCESS_DETACH` (нет UAF после выгрузки),
+  TOCTOU в `IsReadableMemory`/стек-воке обёрнут в SEH, усечения `DWORD`→`uintptr_t`
+  исправлены, снапшот модулей один на хендлер, `FlushFileBuffers`+`WRITE_THROUGH`,
+  фильтр кодов расширен на `STACK_OVERFLOW` и фаталы; `minidump` — защита от
+  `DbgHelp.dll` hijack (`SystemDirectory`+`SEARCH_SYSTEM32`), атомарные счётчики,
+  `__try/__finally` для разлока, `localtime_s`, `ClientPointers FALSE`, `MoveFileExA`,
+  `GetEnvironmentVariableA`; `dbg` — `IsBad*`→`VirtualQuery`, `thread_local` для
+  `s_pFileName`, мьютекс для `SpewGroups`, RAII в `SpewMessageType`; `mem` —
+  `IsAccessibleSpan` overflow, `g_sbaReady` guard, rollback VA; `threadtools` —
+  torn 64-bit read, `getenv`→`GetEnvironmentVariableA`, `PreciseSleep` лимит 5мс и
+  таймаут 100мс для `HighResState`, `FastMutex` copy не дублирует владельца,
+  `WaitForMultipleEvents` >64→-1, `PulseEvent`→`SetEvent`, `SimpleThread` leak fix.
 - **v1.6.2** — улучшение устойчивости (менее крупный внутренний пункт,
   без изменений ABI, 313 экспортов): чистая пара высокоточного таймера
   (`PreciseSleep` поднимает `timeBeginPeriod(1)`, а `Tier0ShutdownHighResTimer()`
@@ -548,6 +561,41 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
     **→ в игре:** временные scratch-буферы остаются корректными на любой
     реальной глубине вложенности; глубокий перекос больше не портит
     указатели/учёт памяти, а просто сообщает о нехватке слота.
+43. **VEH и краш-хендлер** (`tier0.cpp`): хендл `AddVectoredExceptionHandler`
+    теперь сохраняется в `g_hVeh` и снимается в `DLL_PROCESS_DETACH` (нет UAF
+    после `FreeLibrary`), `GetModuleHandleEx(PIN)` проверяется, все разыменования
+    `EBP`/`*addr` обёрнуты в `__try/__except` (TOCTOU), усечения `DWORD`→`uintptr_t`
+    исправлены, монотонность `EBP` проверяется, снапшот `CreateToolhelp32Snapshot`
+    один на весь хендлер, запись с `FILE_FLAG_WRITE_THROUGH`+`FlushFileBuffers`,
+    фильтр кодов расширен на `0xC00000FD` и все фаталы `0xC0000000`.
+    **→ в игре:** краш-лог не теряет второй одновременный краш и не дедлочит
+    внутри `HeapLock`, дамп пишется даже при `STACK_OVERFLOW`.
+44. **Minidump без hijack и дедлоков** (`minidump.cpp`): `DbgHelp.dll` грузится
+    только из `SystemDirectory` с `SEARCH_SYSTEM32`, счётчики `g_bWritingMiniDump`
+    атомарны, `MiniDumpWriter` обёрнут в `__try/__finally` (разлок всегда),
+    `_localtime64_s`, `ClientPointers FALSE`, `MoveFileExA`, `TIER0_MD` через
+    `GetEnvironmentVariableA` (без `getenv` дедлока), `g_dwMiniDumpThreadId`
+    thread-local.
+    **→ в игре:** нельзя подложить DLL в папку мода для RCE, дампы не теряются
+    из-за залипшего лока.
+45. **Dbg без UAF** (`dbg.cpp`): `IsBadReadPtr`→`VirtualQuery`, `s_pFileName`/
+    `s_Line` thread-local, `SpewGroups` под мьютексом, `SpewMessageType` RAII —
+    не держит лок во время `__debugbreak`/`exit`.
+    **→ в игре:** `Msg`/`Warning` из разных потоков не портят имя файла в логе.
+46. **SBA стабильнее** (`mem.cpp`): `IsAccessibleSpan` проверяет overflow `addr+size`,
+    `AllocSBA`/`TLSFree` не трогают `g_SBA` после `g_sbaReady=false` (нет UAF
+    после выгрузки), VA leak при `VirtualAlloc` fail откатывается.
+    **→ в игре:** редкий `Free` после выгрузки DLL не падает.
+47. **PreciseSleep без зависаний** (`threadtools.cpp`): `getenv`→`GetEnvironmentVariableA`,
+    `HighResState` 1→таймаут 100мс с восстановлением, `Tier0ShutdownHighResTimer`
+    корректно обрабатывает 1/3 state, спин `PreciseSleep` ограничен `target+5мс`
+    и `yield` после 2мс (защита от NTP скачка).
+    **→ в игре:** тик не уходит в 100% CPU спин при скачке времени.
+48. **Синхронизация без копий и потерь** (`threadtools.cpp`): `CThreadFastMutex` copy
+    теперь создаёт новый свободный мьютекс (не дублирует владельца), `WaitForMultipleEvents`
+    `>MAXIMUM_WAIT_OBJECTS`→-1 (не усекает молча), `PulseEvent`→`SetEvent`,
+    `SimpleThreadThreadProc` `__try/__finally` для `delete`.
+    **→ в игре:** нет двойного `Unlock` чужого мьютекса и потерянных `Pulse`.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 
