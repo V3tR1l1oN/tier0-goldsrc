@@ -165,7 +165,8 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   проверка поддерживаемых CPUID-листьев, affinity-aware fallback для topology,
   защита crash-handler от повторного входа и проверка читаемости памяти при
   обходе стека. Добавлены `test_threadtools` и расширен CI fallback/crash smoke.
-- **v1.7.0** — полный аудит и массовые фиксы без смены ABI (313 экспортов):
+- **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
+- **v1.7.0** — полный аудит и массовые фиксы без смены ABI (314 экспортов, +`CreateInterface`):
   VEH теперь хранит хендл и снимается в `DLL_PROCESS_DETACH` (нет UAF после выгрузки),
   TOCTOU в `IsReadableMemory`/стек-воке обёрнут в SEH, усечения `DWORD`→`uintptr_t`
   исправлены, снапшот модулей один на хендлер, `FlushFileBuffers`+`WRITE_THROUGH`,
@@ -596,6 +597,26 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
     `>MAXIMUM_WAIT_OBJECTS`→-1 (не усекает молча), `PulseEvent`→`SetEvent`,
     `SimpleThreadThreadProc` `__try/__finally` для `delete`.
     **→ в игре:** нет двойного `Unlock` чужого мьютекса и потерянных `Pulse`.
+49. **CreateInterface фабрика** (`public/tier1/interface.h`, `tier0/interface.cpp`, `tier0.def:314`):
+    `InterfaceReg` self-registration, `EXPOSE_INTERFACE`/`EXPOSE_SINGLE_INTERFACE`,
+    `CreateInterface("VFileSystem009")` по имени/ординалу 314, `Sys_GetFactory`
+    для `client/server.dll`. Сохранены 1-313 оригинальные ординалы, добавлен 314.
+    **→ в игре:** модули грузятся через версионируемый `CreateInterface`, hot-swap без `GetProcAddress` хардкодов.
+50. **IFileSystem V009** (`public/FileSystem.h`, `tier0/filesystem.cpp`): 54 виртуалки,
+    `GetReadBuffer` zero-copy (кэш `malloc+ReadFile`, повторный вызов — тот же указатель),
+    `pathID`/`AddSearchPath`/`FindFirst`, `FullPathToRelativePath`. `Open` резолвит
+    через `m_SearchPaths`, `HintResourceNeed` стаб.
+    **→ в игре:** загрузка карт `-30% fopen`, нет копий файлов в память.
+51. **Кроссплатформа** (`public/tier0/platform.h`, `tier0/platform.cpp`, `Makefile`/`CMakeLists.txt`):
+    ветка `#ifdef _LINUX` → `dlfcn.h` (`dlsym`/`dlopen`), `MAX_PATH`, `snprintf`,
+    `Plat_FloatTime` `clock_gettime(CLOCK_MONOTONIC)`, `tier0.so` `-fPIC -shared`.
+    `build.bat` на Windows без изменений (314).
+    **→ в игре:** `tier0.so` собирается на Linux без переписывания `mem`/`threads`.
+52. **mathlib SIMD** (`public/tier0/mathlib.h`, `tier0/mathlib.cpp`): `vec_t`/`vec3_t`,
+    `DotProduct`/`VectorNormalize` через `_mm_mul_ps`/`_mm_sqrt_ps`/`_mm_hadd_ps`
+    при `GetCPUInformation().m_bSSE`, fallback скаляр, `Q_rsqrt` `_mm_rsqrt_ss`.
+    `build.bat` компилирует `mathlib.cpp` в `tier0.dll`, `test_mathlib` 10k stress.
+    **→ в игре:** `pm_shared`/`vprof` `+5-10%` на `Vector*`.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 
@@ -617,7 +638,7 @@ Tick pacing (7  ms)    :   clean  7.00 ms / battle  7.00 ms, 0/64 медленн
 Clock stability clean  :   max gap ~140 us; >1 us в ~0.006% отсчётов (QPC-пол)
 Clock stability noise  :   max gap ~140 us; >1 us в ~0.07% под боевой загрузкой
 CPU report (AMD 6C/12T):   logical=12 physical=6 (до фикса было 12/12 — fallback); pinned 4→4/2, 2→2/1
-313 экспортов          :   совпадают с оригиналом (dumpbin)
+ 314 экспортов          :   313 оригинал + CreateInterface @314 (dumpbin)
 ```
 
 ## Как убедиться, что всё соответствует оригиналу
