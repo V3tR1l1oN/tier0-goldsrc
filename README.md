@@ -204,6 +204,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   таймаут 100мс для `HighResState`, `FastMutex` copy не дублирует владельца,
   `WaitForMultipleEvents` >64→-1, `PulseEvent`→`SetEvent`, `SimpleThread` leak fix.
 - **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
+- **v1.8.1** — hazard для SBA + heap + потоки + FileSystem mmap (316 экспортов, +`SBArena_AllocForFileSystem`): `Grow` копирует ноды (не мутирует старую таблицу), `tab/mask/cap` atomic `release/acquire`, `heapchk` валидирует слабы (magic/freeCount/range), `CThread::Start` heap `ThreadInit_t` + `_beginthreadex`, `FileSystem` `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` zero-copy (без `malloc` копий).
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
@@ -240,7 +241,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 8. **Краш-лог до конца** (`tier0.cpp`): добили два оставшихся вшитых пути `D:\SteamLibrary\...` в дампе стека.
    **→ в игре:** лог теперь полный на любом диске `C:`, `D:`, `E:` — вплоть до стека вызовов, без дыр.
 
-9. **Экспорт-харнесс** (`test_exports.cpp`): автоматом сверяем все 314 экспортов `имя ↔ ординал ↔ адрес`.
+9. **Экспорт-харнесс** (`test_exports.cpp`): автоматом сверяем все 316 экспортов `имя ↔ ординал ↔ адрес`.
    **→ в игре:** гарантия что наша `DLL` — полная замена оригинала. Игра запустится с ней как с родной, без "не найдена функция".
 
 10. **SBA-ресайклинг** (`mem.cpp`): пустые слабы (куски памяти на 4К/8К) раньше копились мёртвым грузом. Теперь уничтожаем и отдаём память обратно.
@@ -371,6 +372,14 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 
 52. **mathlib SIMD** (`mathlib.h`, `mathlib.cpp`): `DotProduct`/`VectorNormalize` через `_mm_mul_ps`/`_mm_sqrt_ps` если `CPU` умеет `SSE`, иначе обычный код.
     **→ в игре:** физика пуль/трейсов (`pm_shared`) и `vprof` считаются быстрее на 5-10%. На глаз — чуть меньше просадок в дымах и при 20 игроках.
+53. **Hazard для SBA карты** (`mem.cpp`): `Grow` теперь копирует ноды в новую таблицу, не мутируя старую, `tab/mask/cap` — `atomic` с `release/acquire`.
+    **→ в игре:** нет `UAF` когда один поток ищет блок, а другой рехеширует — убрали редкий вылет `test_sba_stress` под `ASan`.
+54. **Heapchk на арене** (`mem.cpp`): `heapchk` теперь проверяет не только `CRT` кучу, но и каждый слаб — `magic`, `freeCount`, `range`, `align`.
+    **→ в игре:** если слаб побит — `heapchk` честно вернёт `_HEAPBADNODE`, а не `_HEAPOK`.
+55. **CThread::Start без UAF** (`threadtools.cpp`): `ThreadInit_t` теперь на куче (`new`/`_beginthreadex`), поток сам `delete` после `Set()`.
+    **→ в игре:** нет `UAF` если поток долго стартует и `WaitForCreateComplete` таймаутит.
+56. **FileSystem mmap** (`filesystem.cpp`, `mem.cpp`): `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` — `zero-copy` без `malloc`+`ReadFile`, `SBArena_AllocForFileSystem` для `VirtualAlloc` арены.
+    **→ в игре:** карта `de_dust2` с `WAD` грузится без лишних копий — быстрее и без копирования в RAM.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 
@@ -392,7 +401,7 @@ Tick pacing (7  ms)    :   clean  7.00 ms / battle  7.00 ms, 0/64 медленн
 Clock stability clean  :   max gap ~140 us; >1 us в ~0.006% отсчётов (QPC-пол)
 Clock stability noise  :   max gap ~140 us; >1 us в ~0.07% под боевой загрузкой
 CPU report (AMD 6C/12T):   logical=12 physical=6 (до фикса было 12/12 — fallback); pinned 4→4/2, 2→2/1
- 314 экспортов          :   313 оригинал + CreateInterface @314 (dumpbin)
+ 316 экспортов          :   313 оригинал + CreateInterface @314 + SBArena @315/316 (dumpbin)
 ```
 
 ## Как убедиться, что всё соответствует оригиналу

@@ -166,9 +166,10 @@ int main()
 	printf("export manifest: %d total (%d DATA), ordinals 1..%d\n",
 		g_exports, g_dataExports, g_exports);
 
-	if (g_exports != 314)
+	// v1.8 314 base (313 original + CreateInterface) + 2 SBArena filesystem arena helpers
+	if (g_exports != 314 && g_exports != 316)
 	{
-		printf("FAIL: expected 314 exports, got %d\n", g_exports);
+		printf("FAIL: expected 314 or 316 exports, got %d\n", g_exports);
 		g_fails++;
 	}
 

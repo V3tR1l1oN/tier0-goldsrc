@@ -569,47 +569,47 @@ struct SBASlab
 			Node *next;
 		};
 
-		// tab/mask/cap are volatile because FindPage is called WITHOUT the lock
-		// (SBAFastClassify). Publishing order is tab, then mask, then cap; a
-		// lock-free reader that reads mask BEFORE tab (and gates on mask) can
-		// only ever observe (old mask, old tab), (old mask, new tab) or
-		// (new mask, new tab) -- never an out-of-bounds (new mask, old tab):
-		// on x86/TSO the tab store precedes the mask store, so the moment the
-		// mask store is visible to a reader the tab store is visible too.
-		// Retired tables and retired nodes are never returned to the OS: slot
-		// drops/chains that a concurrent reader is mid-walk stay mapped forever,
-		// so a stale walk can only miss (falling through to LinearClassify under
-		// the lock), never fault. Memory stays bounded by the live high-water
-		// mark (each generation of the table is ~2x the previous one, and the
-		// node pool peaks at the largest live slab count).
-		//
-		// CRITICAL: the *slab* is NOT covered by that guarantee. A concurrent
-		// DestroySlab() frees the slab backing while a lock-free reader may be
-		// walking a chain that still contains a node pointing at it -- so the
-		// walk must never dereference Node::sl. Slab extent and bucket are
-		// therefore cached in the node itself (see Node::end / Node::bucket).
-		// With the arena on, SBArena_Free only recycles the chunk into a free
-		// list, so a stale read returns garbage instead of faulting; with
-		// SBA_ARENA=0 the slab goes to free() and the same read is a genuine
-		// use-after-free.
-		Node ** volatile tab;
-		volatile unsigned cap;
-		volatile unsigned mask;
-		size_t used;
-		Node *pool;              // retired nodes (never freed, reused on insert)
-		Node ***retired;         // retired tab arrays (never freed)
-		size_t retiredCount;
+	// tab/mask/cap are std::atomic with release/acquire because FindPage/
+	// FindBucket are called WITHOUT the lock (SBAFastClassify). Publishing
+	// order is tab, then mask, then cap; a lock-free reader that reads mask
+	// BEFORE tab (and gates on mask) can only ever observe (old mask, old
+	// tab), (old mask, new tab) or (new mask, new tab) -- never an
+	// out-of-bounds (new mask, old tab): with release/acquire the tab store
+	// happens-before the mask store being visible. Retired tables are never
+	// returned to the OS and nodes are not mutated in place during Grow
+	// (copied instead), so a stale walk can only miss (falling through to
+	// LinearClassify under the lock), never fault or see a torn next pointer.
+	// Memory stays bounded by the live high-water mark (each generation of
+	// the table is ~2x the previous one, and retired tables stay mapped).
+	//
+	// CRITICAL: the *slab* is NOT covered by that guarantee. A concurrent
+	// DestroySlab() frees the slab backing while a lock-free reader may be
+	// walking a chain that still contains a node pointing at it -- so the
+	// walk must never dereference Node::sl. Slab extent and bucket are
+	// therefore cached in the node itself (see Node::end / Node::bucket).
+	// With the arena on, SBArena_Free only recycles the chunk into a free
+	// list, so a stale read returns garbage instead of faulting; with
+	// SBA_ARENA=0 the slab goes to free() and the same read is a genuine
+	// use-after-free.
+	std::atomic<Node**> tab;
+	std::atomic<unsigned> cap;
+	std::atomic<unsigned> mask;
+	size_t used;
+	Node *pool;              // retired nodes (never freed, reused on insert)
+	Node ***retired;         // retired tab arrays (never freed)
+	size_t retiredCount;
 
-		SBASlabMap() : tab( nullptr ), cap( 0 ), mask( 0 ), used( 0 ),
-			pool( nullptr ), retired( nullptr ), retiredCount( 0 ) {}
+	SBASlabMap() : tab( nullptr ), cap( 0 ), mask( 0 ), used( 0 ),
+		pool( nullptr ), retired( nullptr ), retiredCount( 0 ) {}
 
 		~SBASlabMap()
 		{
 			for ( size_t i = 0; i < retiredCount; ++i )
 				free( ( void * )retired[ i ] );
 			free( ( void * )retired );
-			if ( tab )
-				free( ( void * )tab );
+			Node **t = tab.load( std::memory_order_acquire );
+			if ( t )
+				free( ( void * )t );
 			for ( Node *n = pool; n; )
 			{
 				Node *nx = n->next;
@@ -649,38 +649,56 @@ struct SBASlab
 
 		bool Grow()                      // caller holds the lock
 		{
-			unsigned newCap = cap ? cap * 2 : CAP0;
+			unsigned curCap = cap.load( std::memory_order_acquire );
+			unsigned newCap = curCap ? curCap * 2 : CAP0;
 			Node **nt = ( Node ** )calloc( newCap, sizeof( Node * ) );
 			if ( !nt )
 				return false;
 
 			size_t live = 0;
-			if ( tab )
+			Node **oldTab = tab.load( std::memory_order_acquire );
+			if ( oldTab )
 			{
-				for ( unsigned i = 0; i < cap; ++i )
+				for ( unsigned i = 0; i < curCap; ++i )
 				{
-					for ( Node *n = tab[ i ]; n; )
+					for ( Node *n = oldTab[ i ]; n; n = n->next )
 					{
-						Node *nx = n->next;
-						unsigned j = n->page & ( newCap - 1 );
-						n->next = nt[ j ];
-						nt[ j ] = n;
+						Node *c = ( Node * )malloc( sizeof( Node ) );
+						if ( !c )
+						{
+							// OOM during copy: free what we allocated for new table
+							for ( unsigned k = 0; k < newCap; ++k )
+							{
+								for ( Node *x = nt[ k ]; x; )
+								{
+									Node *nx = x->next;
+									free( x );
+									x = nx;
+								}
+							}
+							free( nt );
+							return false;
+						}
+						*c = *n;
+						unsigned j = c->page & ( newCap - 1 );
+						c->next = nt[ j ];
+						nt[ j ] = c;
 						++live;
-						n = nx;
 					}
 				}
-				RetireTab( ( Node ** )tab );
+				RetireTab( oldTab );
 			}
-			tab = nt;                    // publish table first...
-			mask = newCap - 1;           // ...then the mask that indexes it,
-			cap = newCap;                // ...then the write-side gate
+			tab.store( nt, std::memory_order_release );                    // publish table first...
+			mask.store( newCap - 1, std::memory_order_release );           // ...then the mask that indexes it,
+			cap.store( newCap, std::memory_order_release );                // ...then the write-side gate
 			used = live;
 			return true;
 		}
 
 		void InsertKey( SBASlab *s, unsigned page, unsigned char *addr )   // caller holds the lock
 		{
-			if ( cap == 0 || used * 2 >= cap )
+			unsigned curCap = cap.load( std::memory_order_acquire );
+			if ( curCap == 0 || used * 2 >= curCap )
 			{
 				if ( !Grow() )
 					return;            // not indexed; linear scan covers it
@@ -688,14 +706,16 @@ struct SBASlab
 			Node *n = GetNode();
 			if ( !n )
 				return;
-		n->sl = s;
-		n->base = addr;
-		n->end = addr + SBASlabBytes( s->bucket );
-		n->page = page;
-		n->bucket = s->bucket;
-		unsigned j = page & mask;
-			n->next = tab[ j ];
-			tab[ j ] = n;
+			n->sl = s;
+			n->base = addr;
+			n->end = addr + SBASlabBytes( s->bucket );
+			n->page = page;
+			n->bucket = s->bucket;
+			unsigned curMask = mask.load( std::memory_order_acquire );
+			Node **curTab = tab.load( std::memory_order_acquire );
+			unsigned j = page & curMask;
+			n->next = curTab[ j ];
+			curTab[ j ] = n;
 			++used;
 		}
 
@@ -713,10 +733,13 @@ struct SBASlab
 
 		void Remove( SBASlab *sl, unsigned char *addr )                      // caller holds the lock
 		{
-			if ( !cap )
+			unsigned curCap = cap.load( std::memory_order_acquire );
+			if ( !curCap )
 				return;
-			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & mask;
-			for ( Node **pp = ( Node ** )&tab[ j ]; *pp; pp = &( *pp )->next )
+			unsigned curMask = mask.load( std::memory_order_acquire );
+			Node **curTab = tab.load( std::memory_order_acquire );
+			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & curMask;
+			for ( Node **pp = &curTab[ j ]; *pp; pp = &( *pp )->next )
 			{
 				if ( ( *pp )->sl == sl )
 				{
@@ -731,11 +754,14 @@ struct SBASlab
 
 		SBASlab *FindPage( unsigned char *addr )        // may run WITHOUT the lock
 		{
-			unsigned m = mask;
+			unsigned m = mask.load( std::memory_order_acquire );
 			if ( !m )
 				return nullptr;
+			Node **t = tab.load( std::memory_order_acquire );
+			if ( !t )
+				return nullptr;
 			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & m;
-			Node *n = ( Node * )tab[ j ];
+			Node *n = t[ j ];
 			for ( unsigned hops = 0; n && hops < MAX_WALK; ++hops )
 			{
 				// Uses the cached node extent, NOT n->base + SBASlabBytes(
@@ -756,12 +782,16 @@ struct SBASlab
 		// then retries under the lock), never fault.
 		unsigned FindBucket( unsigned char *addr, unsigned char **pSlabBase )
 		{
-			unsigned m = mask;
+			unsigned m = mask.load( std::memory_order_acquire );
 			if ( !m )
 				return SBA_NO_BUCKET;
 
+			Node **t = tab.load( std::memory_order_acquire );
+			if ( !t )
+				return SBA_NO_BUCKET;
+
 			unsigned j = ( ( unsigned )( ( size_t )addr >> 12 ) ) & m;
-			Node *n = ( Node * )tab[ j ];
+			Node *n = t[ j ];
 			for ( unsigned hops = 0; n && hops < MAX_WALK; ++hops )
 			{
 				if ( addr >= n->base && addr < n->end )
@@ -1177,6 +1207,60 @@ struct SBASlab
 			LeaveCriticalSection( &g_SBA.m_cs );
 		}
 	}
+}
+
+// -----------------------------------------------------------------------------
+// SBArena filesystem helpers -- mmap arena for FileSystem::GetReadBuffer
+// Exported as SBArena_AllocForFileSystem / SBArena_FreeForFileSystem.
+// Uses VirtualAlloc page-aligned COMMIT|RESERVE (true mmap arena) so the
+// filesystem can cache a file without memcpy and free with VirtualFree.
+// For tiny files (<=2048) we route through g_pMemAlloc (SBA) to reuse slabs.
+// -----------------------------------------------------------------------------
+extern "C" PLATFORM_INTERFACE void* SBArena_AllocForFileSystem(size_t nSize)
+{
+	if (nSize == 0) nSize = 1;
+	// Small files: SBA path (fast, 8-byte aligned slabs, no VirtualAlloc overhead)
+	if (nSize <= 2048 && g_pMemAlloc)
+	{
+		void *p = g_pMemAlloc->Alloc(nSize);
+		if (p) return p;
+	}
+	size_t aligned = (nSize + 4095) & ~(size_t)4095;
+	if (aligned < 4096) aligned = 4096;
+	void *p = VirtualAlloc(NULL, aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (p) return p;
+	// fallback: CRT / g_pMemAlloc
+	if (g_pMemAlloc) return g_pMemAlloc->Alloc(nSize);
+	return malloc(nSize);
+}
+
+extern "C" PLATFORM_INTERFACE void SBArena_FreeForFileSystem(void* p, size_t nSize)
+{
+	(void)nSize;
+	if (!p) return;
+	MEMORY_BASIC_INFORMATION mbi;
+	if (VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi)
+	{
+		// MEM_MAPPED views (MapViewOfFile) are unmapped, not VirtualFree'd
+		if (mbi.Type == MEM_MAPPED)
+		{
+			UnmapViewOfFile(p);
+			return;
+		}
+		if (mbi.AllocationBase == p && mbi.State == MEM_COMMIT)
+		{
+			VirtualFree(p, 0, MEM_RELEASE);
+			return;
+		}
+	}
+	// SBA / CRT path
+	if (g_pMemAlloc)
+	{
+		// g_pMemAlloc->Free knows SBA vs CRT
+		g_pMemAlloc->Free(p);
+		return;
+	}
+	free(p);
 }
 
 // --------------------------------------------------------------------------------
@@ -1666,10 +1750,101 @@ int CStdMemAlloc::heapchk()
 	// an entirely healthy heap in this allocator/CRT configuration, which would
 	// falsely flag corruption. HeapValidate on the actual CRT heap handle is the
 	// authoritative check and correctly reports TRUE on a healthy heap.
+	// Additionally validates SBA slabs under lock: magic, freeCount, range,
+	// alignment -- any broken slab returns _HEAPBADNODE.
 #ifdef WIN32
-	if ( HeapValidate( ( HANDLE )_get_heap_handle(), 0, NULL ) )
-		return 2; // _HEAPOK
-	return _HEAPBADNODE; // genuine heap corruption surfaced, not masked
+	if ( !HeapValidate( ( HANDLE )_get_heap_handle(), 0, NULL ) )
+		return _HEAPBADNODE;
+
+	EnterCriticalSection( &g_SBA.m_cs );
+	for ( SBASlab *sl = g_SBA.m_slabs; sl; sl = sl->next )
+	{
+		bool bad = false;
+		if ( sl->bucket >= SBA_BUCKETS )
+			bad = true;
+		else if ( sl->capacity == 0 )
+			bad = true;
+		else if ( sl->freeCount > sl->capacity )
+			bad = true;
+		else if ( !sl->base || !sl->end || sl->end <= sl->base )
+			bad = true;
+		else
+		{
+			unsigned expectedBytes = SBASlabBytes( sl->bucket );
+			if ( ( size_t )( sl->end - sl->base ) != expectedBytes )
+				bad = true;
+			else if ( sl->payload != SBAPayload( sl->bucket ) )
+				bad = true;
+			else if ( sl->slot != SBASlot( sl->payload ) )
+				bad = true;
+			else if ( sl->freePtr < sl->base + SBA_DESC_RESERVE || sl->freePtr > sl->end )
+				bad = true;
+			else if ( !sl->freeHead && sl->freeCount != 0 )
+				bad = true;
+			else if ( sl->freeHead )
+			{
+				unsigned char *fh = ( unsigned char * )sl->freeHead;
+				if ( fh < sl->base + SBA_DESC_RESERVE + SBA_HEADER || fh >= sl->end )
+					bad = true;
+				else if ( ( ( uintptr_t )fh & 7 ) != 0 )
+					bad = true;
+			}
+		}
+
+		if ( !bad && sl->freeHead )
+		{
+			void *cur = sl->freeHead;
+			unsigned counted = 0;
+			while ( cur )
+			{
+				if ( counted >= sl->freeCount )
+				{
+					bad = true;
+					break;
+				}
+				unsigned char *p = ( unsigned char * )cur;
+				if ( p < sl->base + SBA_DESC_RESERVE + SBA_HEADER || p + sl->payload > sl->end )
+				{
+					bad = true;
+					break;
+				}
+				if ( ( ( uintptr_t )p & 7 ) != 0 )
+				{
+					bad = true;
+					break;
+				}
+				__try
+				{
+					SBAHeader *h = ( SBAHeader * )( p - SBA_HEADER );
+					if ( h->magic != SBA_MAGIC || h->bucket != sl->bucket )
+						bad = true;
+				}
+				__except ( EXCEPTION_EXECUTE_HANDLER )
+				{
+					bad = true;
+				}
+				if ( bad )
+					break;
+				cur = *( void ** )cur;
+				++counted;
+				if ( counted > sl->capacity )
+				{
+					bad = true;
+					break;
+				}
+			}
+			if ( !bad && counted != sl->freeCount )
+				bad = true;
+		}
+
+		if ( bad )
+		{
+			LeaveCriticalSection( &g_SBA.m_cs );
+			return _HEAPBADNODE;
+		}
+	}
+	LeaveCriticalSection( &g_SBA.m_cs );
+	return 2; // _HEAPOK
 #else
 	return 2; // _HEAPOK
 #endif

@@ -83,4 +83,10 @@ public:
 
 extern "C" PLATFORM_INTERFACE IMemAlloc *g_pMemAlloc;
 
+// SBArena filesystem helpers (mmap arena, zero-copy backing for FileSystem::GetReadBuffer)
+// Allocated via VirtualAlloc (page-aligned, MEM_COMMIT|MEM_RESERVE) so Release is VirtualFree.
+// Exported from tier0.dll for filesystem.cpp and for external callers.
+extern "C" PLATFORM_INTERFACE void* SBArena_AllocForFileSystem(size_t nSize);
+extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nSize);
+
 #endif // MEMALLOC_H
