@@ -70,11 +70,13 @@ namespace
 		void *fl8k;                // recycled 8K chunks
 		CRITICAL_SECTION cs;
 		HANDLE hPrepage;
+		HANDLE hWake;
 		volatile long stop;
 
 		SBArena()
 			: base( NULL ), reserve( 0 ), commitEnd( 0 ), handout( 0 ), touched( 0 ),
-			  target( 0 ), fl4k( NULL ), fl8k( NULL ), hPrepage( NULL ), stop( 0 )
+			  target( 0 ), fl4k( NULL ), fl8k( NULL ), hPrepage( NULL ),
+			  hWake( CreateEventA( NULL, TRUE, FALSE, NULL ) ), stop( 0 )
 		{
 			InitializeCriticalSection( &cs );
 		}
@@ -84,9 +86,23 @@ namespace
 			if ( hPrepage )
 			{
 				InterlockedExchange( &stop, 1 );
-				WaitForSingleObject( hPrepage, 3000 );
+				if ( hWake )
+					SetEvent( hWake );
+
+				// Never destroy the critical section or release the arena while
+				// the helper can still touch them. If an unexpected shutdown bug
+				// prevents the thread from exiting, leak the process-lifetime
+				// resources rather than create a use-after-free during teardown.
+				if ( WaitForSingleObject( hPrepage, 3000 ) != WAIT_OBJECT_0 )
+					return;
+
 				CloseHandle( hPrepage );
 				hPrepage = NULL;
+			}
+			if ( hWake )
+			{
+				CloseHandle( hWake );
+				hWake = NULL;
 			}
 			DeleteCriticalSection( &cs );
 			if ( base )
@@ -95,7 +111,8 @@ namespace
 	};
 
 	static SBArena g_arena;
-	static volatile long g_arenaStarted = 0;
+	// 0=uninitialized, 1=initializing, 2=ready, 3=disabled/failed.
+	static volatile long g_arenaState = 0;
 
 	static unsigned __stdcall SBArena_PrepageThread( void * )
 	{
@@ -126,7 +143,15 @@ namespace
 			if ( want == 0 )
 			{
 				LeaveCriticalSection( &g_arena.cs );
-				Sleep( 8 );
+				if ( g_arena.hWake )
+				{
+					if ( WaitForSingleObject( g_arena.hWake, 8 ) == WAIT_OBJECT_0 )
+						break;
+				}
+				else
+				{
+					Sleep( 8 );
+				}
 				continue;
 			}
 
@@ -167,15 +192,25 @@ namespace
 
 	static bool SBArena_Start()     // one-shot; may be called from any thread, not under any lock
 	{
-		if ( g_arena.base )
+		LONG state = InterlockedCompareExchange( &g_arenaState, 0, 0 );
+		if ( state == 2 )
 			return true;
+		if ( state == 3 )
+			return false;
 
-		if ( InterlockedExchange( &g_arenaStarted, 1 ) )
-			return g_arena.base != NULL;      // another thread is initializing
+		if ( InterlockedCompareExchange( &g_arenaState, 1, 0 ) != 0 )
+		{
+			while ( ( state = InterlockedCompareExchange( &g_arenaState, 0, 0 ) ) == 1 )
+				Sleep( 0 );
+			return state == 2;
+		}
 
 		const char *pOff = getenv( "SBA_ARENA" );
 		if ( pOff && pOff[ 0 ] == '0' )
+		{
+			InterlockedExchange( &g_arenaState, 3 );
 			return false;
+		}
 
 		unsigned reserveMB = 512;
 		const char *pRes = getenv( "SBA_RESERVE_MB" );
@@ -189,7 +224,10 @@ namespace
 		unsigned char *b = ( unsigned char * )VirtualAlloc( NULL,
 			(size_t)reserveMB << 20, MEM_RESERVE, PAGE_READWRITE );
 		if ( !b )
+		{
+			InterlockedExchange( &g_arenaState, 3 );
 			return false;
+		}
 
 		size_t freeRAM = 0;
 		MEMORYSTATUSEX ms;
@@ -225,6 +263,31 @@ namespace
 		if ( !g_arena.hPrepage )
 			g_arena.hPrepage = NULL;
 
+		InterlockedExchange( &g_arenaState, 2 );
+		return true;
+	}
+
+	static bool SBArena_Stop()
+	{
+		LONG state = InterlockedCompareExchange( &g_arenaState, 0, 0 );
+		if ( state != 2 )
+			return true;
+
+		InterlockedExchange( &g_arena.stop, 1 );
+		if ( g_arena.hWake )
+			SetEvent( g_arena.hWake );
+		if ( !g_arena.hPrepage )
+		{
+			InterlockedExchange( &g_arenaState, 3 );
+			return true;
+		}
+
+		if ( WaitForSingleObject( g_arena.hPrepage, 3000 ) != WAIT_OBJECT_0 )
+			return false;
+
+		CloseHandle( g_arena.hPrepage );
+		g_arena.hPrepage = NULL;
+		InterlockedExchange( &g_arenaState, 3 );
 		return true;
 	}
 
@@ -657,6 +720,12 @@ struct SBASlab
 		~CSmallBlockAlloc()
 		{
 			g_sbaReady = false;
+			// Stop the arena helper before returning slab backing. If it cannot
+			// be joined, keep all SBA memory alive for process teardown instead of
+			// freeing storage that the helper may still access.
+			if ( !SBArena_Stop() )
+				return;
+
 			EnterCriticalSection( &m_cs );
 			while ( m_slabs )
 			{

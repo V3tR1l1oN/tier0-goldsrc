@@ -20,6 +20,15 @@ typedef void *(__thiscall *HandleFn)(void *);
 typedef int (__thiscall *CallWorkerFn)(void *, unsigned, unsigned, bool);
 typedef int (__cdecl *WaitEventsFn)(int, const void **, bool, unsigned);
 
+// Run is a __thiscall virtual (this in ECX, int return). The replacement for
+// its vtable slot is a __fastcall free function: the first parameter also
+// arrives in ECX, so the ABI matches without declaring a member function.
+static int __fastcall HangRun(void *)
+{
+    Sleep(INFINITE);
+    return 0;
+}
+
 template <class T>
 static T Resolve(HMODULE dll, const char *name)
 {
@@ -98,6 +107,47 @@ int main()
 
     dtor(worker);
     free(worker);
+
+    // Replace only the Run vtable slot with a deliberately stuck worker. CWorkerThread's
+    // real vtable is 12 slots (0..11): [1]=Start, [3]=Run, [10]=WaitForReply. Call()
+    // dispatches the reply wait through slot 10, so the whole table must be preserved --
+    // a short table would dispatch through out-of-bounds memory and crash. The
+    // environment override keeps this regression fast while the production default
+    // remains 30 seconds.
+    void *stuck = calloc(1, 512);
+    CHECK(stuck != NULL, "stuck-worker storage allocated");
+    if (stuck)
+    {
+        ctor(stuck);
+        void **originalVtable = *(void ***)stuck;
+        void **testVtable = (void **)calloc(12, sizeof(void *));
+        CHECK(testVtable != NULL, "stuck-worker vtable allocated");
+        if (testVtable)
+        {
+            for (int i = 0; i < 12; ++i)
+                testVtable[i] = originalVtable[i];
+            testVtable[3] = (void *)&HangRun;
+            *(void ***)stuck = testVtable;
+
+            CHECK(start(stuck, 0), "stuck worker starts");
+            SetEnvironmentVariableA("TIER0_WORKER_TIMEOUT_MS", "50");
+            CHECK(call(stuck, 0, 77, true) == -1,
+                  "timed-out worker call fails closed");
+            CHECK(!alive(stuck), "timed-out worker is no longer alive");
+            CHECK(join(stuck, 2000), "timed-out worker joins after termination");
+            SetEnvironmentVariableA("TIER0_WORKER_TIMEOUT_MS", NULL);
+
+            *(void ***)stuck = originalVtable;
+            free(testVtable);
+        }
+        dtor(stuck);
+        free(stuck);
+    }
+
+    // WaitForReply is a protected virtual of CWorkerThread and is intentionally
+    // not among the 313 exports, so it is not reachable through GetProcAddress.
+    // Its timeout/terminate behavior is already covered above through the
+    // exported CallWorker path (the stuck-worker case).
 
     HANDLE event = CreateEventA(NULL, FALSE, TRUE, NULL);
     const void *eventPtr = &event;

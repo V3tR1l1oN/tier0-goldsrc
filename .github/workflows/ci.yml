@@ -44,7 +44,8 @@ jobs:
             @{ n = 'test_sba_mt';    e = 0 },
             @{ n = 'sba_diag';       e = 0 },
             @{ n = 'test_regress';   e = 0 },
-            @{ n = 'test_threadtools'; e = 0 }
+            @{ n = 'test_threadtools'; e = 0 },
+            @{ n = 'test_sba_shutdown'; e = 0 }
           )
           # test_crash intentionally crashes (heap corruption assert) -- not run.
           foreach ($t in $procs) {
@@ -83,7 +84,7 @@ jobs:
           # moment the arena is unavailable (SBA_ARENA=0 or a failed reservation).
           $env:SBA_ARENA = '0'
           $fails = @()
-          foreach ($t in @('test_mem','test_sba_stress','test_getsize2048','test_regress')) {
+          foreach ($t in @('test_mem','test_sba_stress','test_getsize2048','test_regress','test_sba_shutdown')) {
             & "tests\$t.exe" *> $null
             if ($LASTEXITCODE -ne 0) { $fails += "$t exit=$LASTEXITCODE" }
           }
@@ -91,7 +92,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $fails += "test_sba_mt exit=$LASTEXITCODE" }
           Remove-Item Env:SBA_ARENA
           if ($fails.Count) { Write-Error "fallback (SBA_ARENA=0) failures: $($fails -join ', ')" }
-          Write-Host "fallback (SBA_ARENA=0): OK (5 tests)"
+          Write-Host "fallback (SBA_ARENA=0): OK (6 tests)"
 
       - name: Crash-log smoke (test_crash crashes on purpose, TIER0_MD=1 writes .mdmp)
         shell: pwsh

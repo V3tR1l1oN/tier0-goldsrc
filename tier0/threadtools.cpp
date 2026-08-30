@@ -812,12 +812,20 @@ bool CThread::Join( unsigned timeout )
 	if ( dwWait == WAIT_FAILED )
 	{
 		AssertMsg( !"\"CThread::Join WAIT_FAILED\"", "" );
-		return true;
+		return false;
 	}
 
-	AssertMsg( dwWait == WAIT_OBJECT_0, "" );
+	if ( dwWait != WAIT_OBJECT_0 )
+		return false;
 
-	return dwWait == WAIT_OBJECT_0;
+	DWORD exitCode = 0;
+	if ( GetExitCodeThread( m_hThread, &exitCode ) )
+		m_result = ( int )exitCode;
+
+	CloseHandle( m_hThread );
+	m_hThread = NULL;
+	m_threadId = 0;
+	return true;
 }
 
 void *CThread::GetThreadHandle()			{ return m_hThread; }
@@ -834,8 +842,9 @@ void CThread::Stop( int timeout )
 
 	if ( ExitCode == STILL_ACTIVE )
 	{
-		// Give the thread up to the requested time to wind down on its own.
-		WaitForSingleObject( m_hThread, timeout );
+		// Negative timeout is the public convention for an infinite wait.
+		const DWORD waitTimeout = timeout < 0 ? INFINITE : ( DWORD )timeout;
+		WaitForSingleObject( m_hThread, waitTimeout );
 	}
 }
 
@@ -857,20 +866,30 @@ unsigned CThread::Resume()
 
 bool CThread::Terminate( int result )
 {
-	// Original t=o: after a successful TerminateThread the handle/thread-id are
-	// zeroed so a later ~CThread / Join does not touch a dead thread object.
-	// Closing the raw handle here is safe: the destructor's CloseHandle(NULL)
-	// becomes a no-op, and no runner touches m_hThread afterwards on this path.
+	if ( !m_hThread )
+		return false;
+
+	// Terminating the calling thread cannot return to update the object safely.
+	if ( m_threadId != 0 && m_threadId == GetCurrentThreadId() )
+		return false;
+
+	DWORD exitCode = STILL_ACTIVE;
+	if ( GetExitCodeThread( m_hThread, &exitCode ) && exitCode != STILL_ACTIVE )
+	{
+		m_result = ( int )exitCode;
+		return true;
+	}
+
 	if ( !TerminateThread( m_hThread, result ) )
 		return false;
 
-	void *hThread = m_hThread;
-	m_hThread = NULL;
-	m_threadId = 0;
+	// Keep the handle owned by CThread until Join() or the destructor confirms
+	// that the kernel object is signaled. This makes a subsequent Join real
+	// synchronization instead of a vacuous success on a NULL handle.
+	if ( WaitForSingleObject( m_hThread, 3000 ) != WAIT_OBJECT_0 )
+		return false;
 
-	if ( hThread )
-		CloseHandle( hThread );
-
+	m_result = result;
 	return true;
 }
 
@@ -966,7 +985,33 @@ unsigned __stdcall CThread::ThreadProc( void * pv )
 // CWorkerThread
 //=============================================================================
 
-#define WTCALL_TIMEOUT	( 30 * 1000 )
+static unsigned WorkerCallTimeout()
+{
+	static volatile LONG s_timeout = -1;
+	LONG timeout = InterlockedCompareExchange( &s_timeout, -1, -1 );
+	if( timeout == -1 )
+	{
+		if( InterlockedCompareExchange( &s_timeout, -2, -1 ) == -1 )
+		{
+			unsigned value = 30 * 1000;
+			const char *psz = getenv( "TIER0_WORKER_TIMEOUT_MS" );
+			if( psz && psz[ 0 ] )
+			{
+				int parsed = atoi( psz );
+				if( parsed >= 0 && parsed <= 10 * 60 * 1000 )
+					value = ( unsigned )parsed;
+			}
+			InterlockedExchange( &s_timeout, ( LONG )value );
+		}
+		timeout = InterlockedCompareExchange( &s_timeout, -1, -1 );
+	}
+	while( timeout == -2 )
+	{
+		Sleep( 0 );
+		timeout = InterlockedCompareExchange( &s_timeout, -1, -1 );
+	}
+	return ( unsigned )timeout;
+}
 
 CWorkerThread::CWorkerThread()
 {
@@ -1026,8 +1071,15 @@ int CWorkerThread::Call( unsigned flags, unsigned callParam, bool fWaitForReply,
 
 	if ( fWaitForReply )
 	{
-		if ( !WaitForReply( WTCALL_TIMEOUT ) )
+		if ( !WaitForReply( WorkerCallTimeout() ) )
+		{
+			// A timed-out one-slot request cannot be safely reused: the worker
+			// could still publish its late reply into the shared m_Call payload.
+			// Fail closed by terminating the worker and leave the slot poisoned;
+			// callers must recreate the worker before issuing another request.
+			Terminate( -1 );
 			return -1;
+		}
 	}
 
 	// The worker's Reply() stores the result in the shared call slot.
