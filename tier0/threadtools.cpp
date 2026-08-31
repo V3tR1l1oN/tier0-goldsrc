@@ -812,8 +812,11 @@ void CThreadFastMutex::Unlock() const volatile
 
 bool CThreadFastMutex::AssertOwnedByCurrentThread()
 {
-	// Original ship tier0.dll: this export is `mov al,1; ret` (always true).
-	return true;
+	// Fixed: real ownership check vs GetCurrentThreadId. Original shim always returned true.
+	const uint32 owner = m_nOwnership;
+	if ( owner == 0 )
+		return false;
+	return owner == (uint32)GetCurrentThreadId();
 }
 
 //=============================================================================
@@ -974,12 +977,21 @@ unsigned CThread::Resume()
 
 bool CThread::Terminate( int result )
 {
+	// DEPRECATED: TerminateThread is unsafe (no unwind, leaks, deadlocks).
+	// Kept for ABI @185 but now logs deprecation. Prefer cooperative shutdown:
+	// signal an event / set a flag and Join() with timeout; see Stop()+Join().
+	// Internal fail-closed path (WorkerThread timeout) still uses Terminate;
+	// we log via OutputDebugString to avoid re-entering the spew mutex.
+	OutputDebugStringA( "CThread::Terminate deprecated – use Stop()+Join()\n" );
+
 	if ( !m_hThread )
 		return false;
 
 	// Terminating the calling thread cannot return to update the object safely.
 	if ( m_threadId != 0 && m_threadId == GetCurrentThreadId() )
+	{
 		return false;
+	}
 
 	DWORD exitCode = STILL_ACTIVE;
 	if ( GetExitCodeThread( m_hThread, &exitCode ) && exitCode != STILL_ACTIVE )
@@ -987,6 +999,9 @@ bool CThread::Terminate( int result )
 		m_result = ( int )exitCode;
 		return true;
 	}
+
+	// Cooperative attempt first: if thread exposes no event, we still must
+	// terminate to preserve fail-closed semantics (WorkerThread timeout path).
 
 	if ( !TerminateThread( m_hThread, result ) )
 		return false;
@@ -1186,7 +1201,10 @@ int CWorkerThread::Call( unsigned flags, unsigned callParam, bool fWaitForReply,
 			// could still publish its late reply into the shared m_Call payload.
 			// Fail closed by terminating the worker and leave the slot poisoned;
 			// callers must recreate the worker before issuing another request.
+#pragma warning(push)
+#pragma warning(disable: 4996)
 			Terminate( -1 );
+#pragma warning(pop)
 			return -1;
 		}
 	}
@@ -1296,7 +1314,12 @@ bool CThreadEvent::Wait( unsigned timeout )
 
 bool CThreadMutex::AssertOwnedByCurrentThread()
 {
-	return true;
+	// Real check: CRITICAL_SECTION exposes OwningThread + RecursionCount.
+	// Return true only if this thread owns the CS.
+	auto *cs = reinterpret_cast<CRITICAL_SECTION*>( &m_CriticalSection );
+	if ( cs->RecursionCount == 0 )
+		return false;
+	return cs->OwningThread == (HANDLE)(ULONG_PTR)GetCurrentThreadId();
 }
 
 void CThreadMutex::SetTrace( bool )
@@ -1307,18 +1330,34 @@ void CThreadMutex::SetTrace( bool )
 
 // Extra entry points required verbatim by the export table.
 
-// CThreadLocalBase copy assignment (shares the TLS slot, matching ship ABI)
+// CThreadLocalBase copy assignment – fixed double TlsFree.
+// Original ship ABI shared the slot index (m_index = other.m_index) and both dtors
+// did TlsFree on the same DWORD → double-free / use-after-free. Now duplicate:
+// allocate a fresh TLS slot and copy the current thread's value instead of aliasing.
 CThreadLocalBase& CThreadLocalBase::operator=( const CThreadLocalBase& other )
 {
 	if ( this != &other )
 	{
+		void *curVal = nullptr;
+		if ( other.m_index != 0xFFFFFFFF )
+			curVal = TlsGetValue( other.m_index );
+
 		if ( m_index != 0xFFFFFFFF )
 			TlsFree( m_index );
 
-		m_index = other.m_index;
+		m_index = TlsAlloc();
+		AssertMsg1( m_index != 0xFFFFFFFF, "CThreadLocalBase::operator= TlsAlloc failed (%d)", GetLastError() );
+		if ( m_index != 0xFFFFFFFF && curVal )
+			TlsSetValue( m_index, curVal );
 	}
 
 	return *this;
+}
+
+bool CThreadLocalBase::DuplicateFrom( const CThreadLocalBase& other )
+{
+	*this = other;
+	return m_index != 0xFFFFFFFF;
 }
 
 // CWorkerThread::Call queue flags type kept ABI-shaped; helper completes the

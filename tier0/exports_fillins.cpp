@@ -44,7 +44,10 @@ CThread::~CThread()
 
 			if ( GetExitCodeThread( m_hThread, &code ) && code == STILL_ACTIVE )
 			{
+#pragma warning(push)
+#pragma warning(disable: 4996)
 				Terminate( -1 );
+#pragma warning(pop)
 			}
 		}
 
