@@ -34,6 +34,16 @@
 	#if defined(__MINGW32__) || defined(__MINGW64__)
 	#define _TIER0_MINGW_LINUX 1
 	#endif
+	// Native GCC/Clang x86 intrinsics (__rdtsc/_mm_pause) when available; the
+	// inline-asm shims below are only used as a fallback.
+	#if !defined(_TIER0_MINGW_LINUX) && !defined(_WIN32) && !defined(_MSC_VER)
+	#if defined(__has_include)
+	#  if __has_include(<x86intrin.h>)
+	#    include <x86intrin.h>
+	#    define _TIER0_X86INTRIN 1
+	#  endif
+	#endif
+	#endif
 	// Valve common/port.h -- Linux shims
 	#ifndef _TIER0_MINGW_LINUX
 	#if defined(__has_include)
@@ -388,9 +398,9 @@
 	#else
 	inline unsigned long _beginthreadex(void*, unsigned, unsigned long (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#endif
-	// _mm_pause shim for Linux (avoid redefinition on MinGW/MSVC or where GCC
-	// already provides <immintrin.h> _mm_pause)
-	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(_MSC_VER) && (!defined(__has_include) || !__has_include(<immintrin.h>))
+	// _mm_pause shim for Linux (avoid redefinition on MSVC or where GCC provides
+	// it natively via <x86intrin.h>/<immintrin.h>)
+	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(_MSC_VER) && !defined(_TIER0_X86INTRIN)
 	inline void _mm_pause() { __asm__ __volatile__("pause"); }
 	#define _MM_PAUSE_DEFINED
 	#endif
@@ -436,19 +446,20 @@
 	#  include <strings.h>
 	#endif
 	#endif // _TIER0_MINGW_LINUX
-	// __rdtsc fallback for CCycleCount (skip on MSVC/MinGW or where GCC provides
-	// it natively via <x86intrin.h>/<ia32intrin.h>)
-	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED) && !defined(_MSC_VER) && (!defined(__has_include) || (!__has_include(<x86intrin.h>) && !__has_include(<immintrin.h>)))
-		#if defined(__i386__) || defined(__x86_64__)
-			inline unsigned long long __rdtsc()
-			{
-				unsigned int lo, hi;
-				__asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
-				return ((unsigned long long)hi << 32) | lo;
-			}
-		#else
-			// generic: use clock as fallback
-			inline unsigned long long __rdtsc() { return 0; }
+	// Provide __rdtsc fallback for CCycleCount when the native header is absent.
+	#if !defined(_WIN32) && !defined(_MSC_VER)
+		#if !defined(_TIER0_X86INTRIN) && !defined(__rdtsc) && !defined(__RDTSC_DEFINED)
+			#if defined(__i386__) || defined(__x86_64__)
+				inline unsigned long long __rdtsc()
+				{
+					unsigned int lo, hi;
+					__asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+					return ((unsigned long long)hi << 32) | lo;
+				}
+			#else
+				// generic: use clock as fallback
+				inline unsigned long long __rdtsc() { return 0; }
+			#endif
 		#endif
 	#endif
 #endif
