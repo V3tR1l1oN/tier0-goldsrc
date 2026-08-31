@@ -8,7 +8,8 @@
 #include "platform.h"
 
 #ifdef POSIX
-#include "cpu_posix.cpp"
+// CPU detection lives in cpu_posix.cpp (compiled as its own TU) on POSIX.
+// cpu.cpp carries the Win32 ASM path only.
 #elif _WIN32
 
 #undef ARRAYSIZE
