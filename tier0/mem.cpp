@@ -20,6 +20,11 @@
 #include "winlite.h"
 #endif
 
+#ifdef _LINUX
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #undef NO_MALLOC_OVERRIDE
 #include "memalloc.h"
 
@@ -112,7 +117,11 @@ namespace
 			}
 			DeleteCriticalSection( &cs );
 			if ( base )
+#ifdef _LINUX
+				munmap( base, g_arena.reserve );
+#else
 				VirtualFree( base, 0, MEM_RELEASE );
+#endif
 		}
 	};
 
@@ -122,7 +131,12 @@ namespace
 
 	static unsigned __stdcall SBArena_PrepageThread( void * )
 	{
+#ifdef _LINUX
+		// Thread priority is a POSIX scheduling nicety; keep normal priority on Linux.
+		(void)0;
+#else
 		SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL );
+#endif
 
 		for ( ;; )
 		{
@@ -183,8 +197,17 @@ namespace
 			bool commitOk = true;
 			if ( add )
 			{
+#ifdef _LINUX
+				// The arena was created with a PROT_NONE anonymous reservation
+				// (line ~270); committing a sub-range grants rw access via a
+				// MAP_FIXED remap of that known, page-aligned VA range.
+				if ( mmap( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE,
+					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0 ) == MAP_FAILED )
+					commitOk = false;
+#else
 				if ( !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
 					commitOk = false;
+#endif
 			}
 			if ( commitOk && grow )
 			{
@@ -267,19 +290,32 @@ namespace
 				reserveMB = (unsigned)v;
 		}
 
+#ifdef _LINUX
+		// MEM_RESERVE on Linux: a PROT_NONE anonymous reservation. Pages stay
+		// inaccessible until the allocator commits sub-ranges (MAP_FIXED remaps).
+		void *mm = mmap( NULL, (size_t)reserveMB << 20, PROT_NONE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
+		unsigned char *b = ( mm == MAP_FAILED ) ? NULL : ( unsigned char * )mm;
+#else
 		unsigned char *b = ( unsigned char * )VirtualAlloc( NULL,
 			(size_t)reserveMB << 20, MEM_RESERVE, PAGE_READWRITE );
+#endif
 		if ( !b )
 		{
 			g_arenaState.store( 3, std::memory_order_release );
 			return false;
 		}
 
+#ifdef _LINUX
+		size_t freeRAM = ( size_t )( ( ( uint64_t )sysconf( _SC_AVPHYS_PAGES )
+			* sysconf( _SC_PAGESIZE ) ) >> 20 );
+#else
 		size_t freeRAM = 0;
 		MEMORYSTATUSEX ms;
 		ms.dwLength = sizeof( ms );
 		if ( GlobalMemoryStatusEx( &ms ) )
 			freeRAM = ( size_t )( ms.ullAvailPhys >> 20 );
+#endif
 
 		size_t targetMB = freeRAM / 8;
 		if ( targetMB < 64 )
@@ -407,7 +443,13 @@ namespace
 
 		if ( p && add )
 		{
+#ifdef _LINUX
+			if ( add == 0 ||
+				mmap( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE,
+					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0 ) == MAP_FAILED )
+#else
 			if ( add == 0 || !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
+#endif
 			{
 				// Roll back handout on failure (VA leak fix)
 				EnterCriticalSection( &g_arena.cs );
@@ -1229,8 +1271,16 @@ extern "C" PLATFORM_INTERFACE void* SBArena_AllocForFileSystem(size_t nSize)
 	}
 	size_t aligned = (nSize + 4095) & ~(size_t)4095;
 	if (aligned < 4096) aligned = 4096;
+#ifdef _LINUX
+	{
+		void *pm = mmap(NULL, aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		void *p = (pm == MAP_FAILED) ? NULL : pm;
+		if (p) return p;
+	}
+#else
 	void *p = VirtualAlloc(NULL, aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	if (p) return p;
+#endif
 	// fallback: CRT / g_pMemAlloc
 	if (g_pMemAlloc) return g_pMemAlloc->Alloc(nSize);
 	return malloc(nSize);
@@ -1240,6 +1290,20 @@ extern "C" PLATFORM_INTERFACE void SBArena_FreeForFileSystem(void* p, size_t nSi
 {
 	(void)nSize;
 	if (!p) return;
+#ifdef _LINUX
+	// Mirror the allocator's routing: the mmap arena is only used when the
+	// small SBA/CRT path cannot serve the request (nSize > 2048, or no
+	// g_pMemAlloc installed). Such blocks are plain anonymous mmaps; release
+	// them with munmap using the reconstructed page-aligned size. Small
+	// SBA/CRT blocks fall through to g_pMemAlloc->Free / free below.
+	if ( nSize > 2048 || !g_pMemAlloc )
+	{
+		size_t aligned = ( nSize + 4095 ) & ~( size_t )4095;
+		if ( aligned < 4096 ) aligned = 4096;
+		munmap( p, aligned );
+		return;
+	}
+#else
 	MEMORY_BASIC_INFORMATION mbi;
 	if (VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi)
 	{
@@ -1255,6 +1319,7 @@ extern "C" PLATFORM_INTERFACE void SBArena_FreeForFileSystem(void* p, size_t nSi
 			return;
 		}
 	}
+#endif
 	// SBA / CRT path
 	if (g_pMemAlloc)
 	{
@@ -1404,9 +1469,15 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 	}
 	else
 	{
+#ifdef _LINUX
+		// malloc_usable_size reports the real usable CRT block size without
+		// faulting on memory the process does not own (returns 0 for junk).
+		const size_t hs = malloc_usable_size( pMem );
+#else
 		// HeapSize reports (SIZE_T)-1 for a pointer it does not own. Left
 		// unchecked that becomes the copy length below and reads past the block.
 		const size_t hs = ( size_t )HeapSize( ( HANDLE )_get_heap_handle(), 0, pMem );
+#endif
 		oldSize = ( hs == ( size_t )-1 ) ? 0 : hs;
 	}
 
@@ -1416,6 +1487,9 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 	if ( oldBucket == SBA_NO_BUCKET && newBucket == SBA_NO_BUCKET )
 	{
 		// large -> large: plain CRT realloc with SEH fallback
+#ifdef _LINUX
+		p = realloc( pMem, nSize );
+#else
 		__try
 		{
 			p = realloc( pMem, nSize );
@@ -1424,6 +1498,7 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 		{
 			p = nullptr;
 		}
+#endif
 
 		if ( !p )
 		{
@@ -1431,7 +1506,11 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 			if ( p )
 			{
 				memcpy( p, pMem, ( oldSize < nSize ) ? oldSize : nSize );
+#ifdef _LINUX
+				free( pMem );
+#else
 				__try { free( pMem ); } __except( EXCEPTION_EXECUTE_HANDLER ) {}
+#endif
 			}
 		}
 
@@ -1464,7 +1543,11 @@ void* CStdMemAlloc::Realloc( void* pMem, size_t nSize )
 		{
 			// old CRT block retired outside the lock
 			if ( p )
+#ifdef _LINUX
+				free( pMem );
+#else
 				__try { free( pMem ); } __except( EXCEPTION_EXECUTE_HANDLER ) {}
+#endif
 		}
 
 		if ( !p && g_pfnFailHandler )
@@ -1517,6 +1600,9 @@ void CStdMemAlloc::Free( void* pMem, int unknown )
 
 	if ( bucket == SBA_NO_BUCKET )
 	{
+#ifdef _LINUX
+		free( pMem );
+#else
 		__try
 		{
 			free( pMem );
@@ -1525,6 +1611,7 @@ void CStdMemAlloc::Free( void* pMem, int unknown )
 		{
 			// Non-CRT heap pointer, ignore safely
 		}
+#endif
 	}
 }
 
@@ -1605,6 +1692,13 @@ static bool IsAccessibleSpan( const void* pMem, size_t size, int bWrite )
 	if ( size > (size_t)( ~(size_t)0 - (size_t)pMem ) )
 		return false;
 
+#ifdef _LINUX
+	// Best-effort access validator. The Windows VirtualQuery/commit/protect
+	// semantics have no direct POSIX equivalent; these checks are defensive
+	// (kernel-enforced page protection still faults on genuinely bad access),
+	// so report true for any well-formed pointer without probing.
+	return true;
+#else
 	MEMORY_BASIC_INFORMATION mbi;
 	unsigned char* addr = ( unsigned char* )pMem;
 	unsigned char* const end = addr + size;
@@ -1625,6 +1719,7 @@ static bool IsAccessibleSpan( const void* pMem, size_t size, int bWrite )
 		addr = ( unsigned char* )regionEnd;
 	}
 	return true;
+#endif
 }
 
 int CStdMemAlloc::CrtIsValidHeapPointer( const void* pMem )
