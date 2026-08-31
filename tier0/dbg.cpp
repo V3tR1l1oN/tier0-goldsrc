@@ -86,6 +86,25 @@ static bool IsReadableMemory( const void* ptr, SIZE_T size )
 		return size == 0 && ptr != nullptr; // zero-size check considered valid if ptr non-null; caller handles count==0 separately
 	if ( size > 0x7fffffff )
 		return false;
+#ifdef _LINUX
+	// POSIX: mincore() reports which pages are backed by physical memory.
+	// A readable mapping is committed; a fault-free read on an uncommitted or
+	// protected/unreadable page would SIGSEGV. We scan page-by-page.
+	size_t page = (size_t)sysconf( _SC_PAGESIZE );
+	if ( page == 0 )
+		page = 4096;
+	const uintptr_t start = (uintptr_t)ptr;
+	const uintptr_t endp = start + (uintptr_t)size;
+	for ( uintptr_t p = start & ~(uintptr_t)( page - 1 ); p < endp; p += page )
+	{
+		unsigned char vec = 0;
+		if ( mincore( (void*)p, page, &vec ) != 0 )
+			return false;
+		if ( ( vec & 1 ) == 0 )
+			return false;
+	}
+	return true;
+#else
 	const BYTE* addr = (const BYTE*)ptr;
 	const BYTE* end = addr + size;
 	MEMORY_BASIC_INFORMATION mbi;
@@ -110,6 +129,7 @@ static bool IsReadableMemory( const void* ptr, SIZE_T size )
 			return false;
 		addr = next;
 	}
+#endif
 	return true;
 }
 
@@ -119,6 +139,10 @@ static bool IsWritableMemory( void* ptr, SIZE_T size )
 		return size == 0 && ptr != nullptr;
 	if ( size > 0x7fffffff )
 		return false;
+#ifdef _LINUX
+	// POSIX: assume writable for the pointer we own (no cheap portable probe).
+	return true;
+#else
 	const BYTE* addr = (const BYTE*)ptr;
 	const BYTE* end = addr + size;
 	MEMORY_BASIC_INFORMATION mbi;
@@ -143,6 +167,7 @@ static bool IsWritableMemory( void* ptr, SIZE_T size )
 			return false;
 		addr = next;
 	}
+#endif
 	return true;
 }
 
