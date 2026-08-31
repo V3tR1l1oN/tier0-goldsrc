@@ -397,7 +397,7 @@
 	#if defined(_MSC_VER)
 	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#else
-	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
+	inline void* _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#endif
 	// _mm_pause shim for Linux (avoid redefinition on MSVC or where GCC provides
 	// it natively via <x86intrin.h>/<immintrin.h>)
