@@ -10,9 +10,16 @@
 #define MINIDUMP_H
 
 #include "platform.h"
+
+#ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
 #include <eh.h>
+#else
+enum _EXCEPTION_DISPOSITION { ExceptionContinueExecution = 0, ExceptionContinueSearch = 1, ExceptionNestedException = 2, ExceptionCollidedUnwind = 3 };
+struct EXCEPTION_POINTERS;
+#define NULL 0
+#endif
 
 typedef void (*FnWMain)( int, tchar ** );
 typedef void (*FnVoidPtrFn)( void * );
