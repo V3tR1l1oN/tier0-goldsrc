@@ -3,8 +3,6 @@
 // GetReadBuffer: true zero-copy via CreateFileMapping/MapViewOfFile (mmap).
 // Fallback path uses SBArena_AllocForFileSystem (VirtualAlloc arena) instead of malloc.
 #ifdef _LINUX
-#define _GNU_SOURCE
-#endif
 #include "../public/tier1/interface.h"
 #ifdef _LINUX
 #include <sys/stat.h>
@@ -16,6 +14,22 @@
 #include <fnmatch.h>
 #include <climits>
 #include <cerrno>
+#include <cctype>
+#include <string>
+
+// Case-insensitive glob match (no _GNU_SOURCE so std::clamp isn't broken by the
+// glibc `clamp` macro). Lowercases pattern+name, then fnmatch case-sensitively.
+static bool fnmatch_ci( const std::string& pat, const char* name )
+{
+	std::string lowerPat = pat;
+	for( size_t i = 0; i < lowerPat.size(); ++i )
+		lowerPat[i] = ( char )tolower( ( unsigned char )lowerPat[i] );
+	std::string lowerName = name;
+	for( size_t i = 0; i < lowerName.size(); ++i )
+		lowerName[i] = ( char )tolower( ( unsigned char )lowerName[i] );
+	return fnmatch( lowerPat.c_str(), lowerName.c_str(), 0 ) == 0;
+}
+
 #ifndef INVALID_HANDLE_VALUE
 #define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
 #endif
@@ -1001,7 +1015,7 @@ public:
 			// skip "." and ".." unless pattern starts with dot
 			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
 				continue;
-			if (fnmatch(pattern.c_str(), entry->d_name, FNM_CASEFOLD) != 0)
+			if (fnmatch_ci(pattern, entry->d_name) != 0)
 				continue;
 			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
 			fhi->cFileName[MAX_PATH - 1] = '\0';
@@ -1075,7 +1089,7 @@ public:
 		{
 			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
 				continue;
-			if (fnmatch(pattern.c_str(), entry->d_name, FNM_CASEFOLD) != 0)
+			if (fnmatch_ci(pattern, entry->d_name) != 0)
 				continue;
 			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
 			fhi->cFileName[MAX_PATH - 1] = '\0';
