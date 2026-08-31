@@ -15,9 +15,8 @@ PUBDIR   = public
 OUTDIR   = build
 TARGET   = $(OUTDIR)/tier0.so
 
-# Primary cross-platform sources -- platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux.
-# Full tier0/*.cpp requires porting tchar.h/strtools etc. — keep minimal for now (17KB SO).
-SRCS     = $(SRCDIR)/platform.cpp $(SRCDIR)/interface.cpp
+# Full tier0 sources — all tier0/*.cpp (port tchar.h done, try full build).
+SRCS     = $(wildcard $(SRCDIR)/*.cpp)
 
 OBJS     = $(patsubst $(SRCDIR)/%.cpp,$(OUTDIR)/%.o,$(SRCS))
 
