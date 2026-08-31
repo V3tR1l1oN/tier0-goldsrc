@@ -15,11 +15,9 @@ PUBDIR   = public
 OUTDIR   = build
 TARGET   = $(OUTDIR)/tier0.so
 
-# Primary cross-platform sources -- platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux.
-# cpu.cpp POSIX path requires cpu_posix.cpp, so still excluded.
-SRCS     = $(SRCDIR)/platform.cpp $(SRCDIR)/interface.cpp
-# Extend as more modules gain _LINUX guards:
-# SRCS  += $(SRCDIR)/mem.cpp $(SRCDIR)/threadtools.cpp ...
+# Full tier0 sources — try all tier0/*.cpp (each has _LINUX guards, fallback to stub on Linux).
+# Windows-only asm (fdumped_asm_exact.asm) is excluded.
+SRCS     = $(wildcard $(SRCDIR)/*.cpp)
 
 OBJS     = $(patsubst $(SRCDIR)/%.cpp,$(OUTDIR)/%.o,$(SRCS))
 
