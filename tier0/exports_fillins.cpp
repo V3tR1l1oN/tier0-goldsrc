@@ -17,6 +17,10 @@
 #include "vprof.h"
 #include "memalloc.h"
 
+#ifdef _LINUX
+#include <sys/prctl.h>
+#endif
+
 // Force the linker to retain the inline CThread dtor COMDAT. It is exported only
 // through the .def alias "??1CThread@@UAE@XZ"="??1CThread@@QAE@XZ", and the alias
 // alone does not root the COMDAT, so without this the link fails with LNK2001.
@@ -132,12 +136,8 @@ struct tagTHREADNAME_INFO
 void Plat_SetThreadName( const char *pszName )
 {
 #ifdef _LINUX
-	// POSIX: name the current thread via prctl (glibc < 2.32 lacks pthread_setname_np on pthread_t restriction);
-	// prctl sets the caller thread's name.
-#if defined(__linux__) && !defined(__ANDROID__)
-	#include <sys/prctl.h>
+	// POSIX: name the current thread via prctl (sets the caller thread's name).
 	prctl( PR_SET_NAME, pszName ? pszName : "", 0, 0, 0 );
-#endif
 	return;
 #else
 	tagTHREADNAME_INFO info;
