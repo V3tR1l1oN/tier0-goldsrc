@@ -4,7 +4,6 @@
 // Fallback path uses SBArena_AllocForFileSystem (VirtualAlloc arena) instead of malloc.
 #ifdef _LINUX
 #include "../public/tier1/interface.h"
-#ifdef _LINUX
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -83,6 +82,9 @@ extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nS
 #include <cstdarg>
 #include <ctime>
 #include <algorithm>
+#ifdef clamp
+#undef clamp // Valve 3-arg clamp macro conflicts with std::clamp in <algorithm>
+#endif
 
 // Helpers
 static std::string NormalizePath(const char *p)
