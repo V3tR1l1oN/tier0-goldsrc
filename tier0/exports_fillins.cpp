@@ -77,6 +77,9 @@ bool Is64BitWindows()
 {
 #if defined( _WIN64 )
 	return true;
+#elif defined( _LINUX )
+	// On a 64-bit Linux binary the process itself is 64-bit.
+	return sizeof( void* ) == 8;
 #else
 	typedef BOOL ( WINAPI *LPFN_ISWOW64PROCESS )( HANDLE, PBOOL );
 
@@ -128,6 +131,15 @@ struct tagTHREADNAME_INFO
 
 void Plat_SetThreadName( const char *pszName )
 {
+#ifdef _LINUX
+	// POSIX: name the current thread via prctl (glibc < 2.32 lacks pthread_setname_np on pthread_t restriction);
+	// prctl sets the caller thread's name.
+#if defined(__linux__) && !defined(__ANDROID__)
+	#include <sys/prctl.h>
+	prctl( PR_SET_NAME, pszName ? pszName : "", 0, 0, 0 );
+#endif
+	return;
+#else
 	tagTHREADNAME_INFO info;
 
 	info.dwType = 0x1000;
@@ -142,6 +154,7 @@ void Plat_SetThreadName( const char *pszName )
 	__except ( EXCEPTION_CONTINUE_EXECUTION )
 	{
 	}
+#endif
 }
 
 //=============================================================================
