@@ -76,15 +76,15 @@ extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nS
 #endif
 #endif // !_LINUX
 #include "../public/FileSystem.h"
+#ifdef clamp
+#undef clamp // Valve 3-arg clamp macro conflicts with std::clamp in <algorithm>
+#endif
 #include <vector>
 #include <string>
 #include <cstdio>
 #include <cstdarg>
 #include <ctime>
 #include <algorithm>
-#ifdef clamp
-#undef clamp // Valve 3-arg clamp macro conflicts with std::clamp in <algorithm>
-#endif
 
 // Helpers
 static std::string NormalizePath(const char *p)
