@@ -14,15 +14,8 @@ add_definitions(-DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS)
 
 include_directories(public public/tier0 tier0)
 
-# Primary cross-platform units - platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux
-# Extend SRCS as more modules gain _LINUX guards.
-set(SRCS
-    tier0/platform.cpp
-    tier0/interface.cpp
-    # tier0/cpu.cpp            # requires tier0/cpu_posix.cpp for POSIX path
-    # tier0/mem.cpp
-    # tier0/threadtools.cpp
-)
+# Full tier0 sources — all tier0/*.cpp (each has _LINUX guards, fallback to stub).
+file(GLOB SRCS "tier0/*.cpp")
 
 if(UNIX)
     add_library(tier0 SHARED ${SRCS})
