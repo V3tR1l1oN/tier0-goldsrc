@@ -7,7 +7,9 @@
 #include "platform.h"
 #include "dbg.h"
 #include <malloc.h>
+#ifdef _WIN32
 #include <process.h>
+#endif
 #include <stdlib.h>
 #include <atomic>
 #include <cerrno>
