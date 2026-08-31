@@ -186,6 +186,7 @@
 	typedef unsigned long DWORD_PTR;
 	typedef unsigned short WORD;
 	typedef unsigned char BYTE;
+	typedef unsigned long SIZE_T;
 	typedef long HRESULT;
 	typedef void* LPSECURITY_ATTRIBUTES;
 	typedef void* LPLONG_PTR;
