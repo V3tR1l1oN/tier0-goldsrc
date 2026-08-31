@@ -10,12 +10,16 @@
 #include "dbg.h"
 #include "threadtools.h"
 
+#ifdef _WIN32
 #include <process.h>
 #include <intrin.h>
+#endif
 #include <stdlib.h>
 
-#ifdef WIN32
+#if defined(_WIN32) || defined(WIN32)
 static DWORD g_ThreadMainThreadID = GetCurrentThreadId();
+#elif defined(_LINUX)
+static DWORD g_ThreadMainThreadID = 0;
 #endif
 
 static CThreadLocalPtr<CThread> g_pCurThread;

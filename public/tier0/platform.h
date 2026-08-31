@@ -13,30 +13,82 @@
 //-----------------------------------------------------------------------------
 // Platform detection -- Valve style: _WIN32 vs _LINUX (common/port.h)
 //-----------------------------------------------------------------------------
-#if defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
-	#ifndef _WIN32
-	#define _WIN32 1
+#if defined(_LINUX) || defined(__linux__) || defined(linux) || defined(POSIX)
+	// _LINUX takes precedence over _WIN32 (allows cross-compile with -D_LINUX on MSVC/MinGW)
+	#ifdef _WIN32
+	#undef _WIN32
 	#endif
-	#define WIN32 1
-	#ifndef _WIN32_WINNT
-	#define _WIN32_WINNT 0x0601
+	#ifdef WIN32
+	#undef WIN32
 	#endif
-	#include <windows.h>
-#elif defined(_LINUX) || defined(__linux__) || defined(linux) || defined(POSIX)
+	#ifdef _WINDOWS
+	#undef _WINDOWS
+	#endif
 	#ifndef _LINUX
 	#define _LINUX 1
 	#endif
 	#ifndef POSIX
 	#define POSIX 1
 	#endif
+	// On MinGW, POSIX headers are Windows wrappers that require _WIN32; skip them in _LINUX mode.
+	#if defined(__MINGW32__) || defined(__MINGW64__)
+	#define _TIER0_MINGW_LINUX 1
+	#endif
 	// Valve common/port.h -- Linux shims
-	#include <dlfcn.h>
-	#include <unistd.h>
-	#include <sys/time.h>
-	#include <sys/types.h>
-	#include <time.h>
-	#include <strings.h>
-	#include <limits.h>
+	#ifndef _TIER0_MINGW_LINUX
+	#if defined(__has_include)
+	#  if __has_include(<dlfcn.h>)
+	#    include <dlfcn.h>
+	#  endif
+	#  if __has_include(<unistd.h>)
+	#    include <unistd.h>
+	#  endif
+	#  if __has_include(<sys/time.h>)
+	#    include <sys/time.h>
+	#  endif
+	#  if __has_include(<sys/types.h>)
+	#    include <sys/types.h>
+	#  endif
+	#  if __has_include(<time.h>)
+	#    include <time.h>
+	#  endif
+	#  if __has_include(<strings.h>)
+	#    include <strings.h>
+	#  endif
+	#  if __has_include(<limits.h>)
+	#    include <limits.h>
+	#  endif
+	#else
+	#  include <dlfcn.h>
+	#  include <unistd.h>
+	#  include <sys/time.h>
+	#  include <sys/types.h>
+	#  include <time.h>
+	#  include <strings.h>
+	#  include <limits.h>
+	#endif
+	#endif // _TIER0_MINGW_LINUX
+	// Fallback definitions when POSIX headers not available (MSVC cross-compile check)
+	#ifndef RTLD_NOW
+	#define RTLD_NOW 0
+	#define RTLD_NOLOAD 0
+	#endif
+	#ifndef RTLD_NOLOAD
+	#define RTLD_NOLOAD 0
+	#endif
+	#if defined(_MSC_VER) && !defined(__has_include)
+	// Provide dummy dlopen/dlsym/dlclose for MSVC _LINUX probe
+	extern "C" inline void* dlopen(const char*, int) { return nullptr; }
+	extern "C" inline void* dlsym(void*, const char*) { return nullptr; }
+	extern "C" inline int dlclose(void*) { return 0; }
+	// Dummy getpid/gettimeofday/usleep for MSVC probe
+	extern "C" inline int getpid() { return 1; }
+	struct timeval; // forward
+	extern "C" inline int gettimeofday(struct timeval*, void*) { return 0; }
+	extern "C" inline int usleep(unsigned int) { return 0; }
+	extern "C" inline int strcasecmp(const char*, const char*) { return 0; }
+	extern "C" inline int strncasecmp(const char*, const char*, size_t) { return 0; }
+	#endif
 
 	#ifndef MAX_PATH
 	#define MAX_PATH 260
@@ -66,7 +118,8 @@
 	#define GetCurrentProcess() ((HANDLE)0)
 	#endif
 
-	// string / snprintf -- Valve: _snprintf -> snprintf
+	// string / snprintf -- Valve: _snprintf -> snprintf (skip on MinGW where UCRT already provides them)
+	#ifndef _TIER0_MINGW_LINUX
 	#ifndef _snprintf
 	#define _snprintf snprintf
 	#endif
@@ -85,6 +138,7 @@
 	#ifndef strnicmp
 	#define strnicmp strncasecmp
 	#endif
+	#endif // _TIER0_MINGW_LINUX
 	#ifndef _alloca
 	#define _alloca alloca
 	#endif
@@ -119,6 +173,229 @@
 	typedef char* LPSTR;
 	typedef const char* LPCSTR;
 	typedef void* HKEY;
+
+	// --- Win32 integer types missing on Linux ---
+	#ifndef LONG_DEFINED
+	#define LONG_DEFINED
+	typedef long LONG;
+	typedef long* PLONG;
+	typedef long* LPLONG;
+	typedef unsigned long* LPDWORD;
+	typedef long LONG_PTR;
+	typedef unsigned long ULONG_PTR;
+	typedef unsigned long DWORD_PTR;
+	typedef unsigned short WORD;
+	typedef unsigned char BYTE;
+	typedef long HRESULT;
+	typedef void* LPSECURITY_ATTRIBUTES;
+	typedef void* LPLONG_PTR;
+	#endif
+
+	// pthread for CRITICAL_SECTION (Valve Linux shim) -- skip on MinGW where it requires _WIN32
+	#ifndef _TIER0_MINGW_LINUX
+	#if defined(__has_include)
+	#  if __has_include(<pthread.h>)
+	#    include <pthread.h>
+	#    define _TIER0_HAS_PTHREAD 1
+	#  endif
+	#elif defined(__linux__) || defined(_LINUX)
+	#  include <pthread.h>
+	#  define _TIER0_HAS_PTHREAD 1
+	#endif
+	#endif // _TIER0_MINGW_LINUX
+
+	// CRITICAL_SECTION -- Valve port.h: emulate Win32 CS with pthread recursive mutex
+	#ifndef _CRITICAL_SECTION_DEFINED
+	#define _CRITICAL_SECTION_DEFINED
+	#if defined(_TIER0_HAS_PTHREAD)
+	struct CRITICAL_SECTION
+	{
+		pthread_mutex_t mutex;
+		long RecursionCount;
+		void* OwningThread;
+		long LockCount;
+	};
+	#else
+	struct CRITICAL_SECTION
+	{
+		int dummy;
+		long RecursionCount;
+		void* OwningThread;
+		long LockCount;
+	};
+	#endif
+	typedef struct CRITICAL_SECTION CRITICAL_SECTION;
+	typedef struct CRITICAL_SECTION* LPCRITICAL_SECTION;
+	typedef struct CRITICAL_SECTION* PCRITICAL_SECTION;
+	// extra Win32 CRITICAL_SECTION alias used by some code
+	typedef CRITICAL_SECTION* LP_CRITICAL_SECTION;
+	#endif
+
+	// CRITICAL_SECTION helpers -- inline, no Windows dependency
+	#if defined(_TIER0_HAS_PTHREAD)
+	inline void InitializeCriticalSection(CRITICAL_SECTION* cs)
+	{
+		pthread_mutexattr_t attr;
+		pthread_mutexattr_init(&attr);
+		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+		pthread_mutex_init(&cs->mutex, &attr);
+		pthread_mutexattr_destroy(&attr);
+		cs->RecursionCount = 0;
+		cs->OwningThread = nullptr;
+		cs->LockCount = 0;
+	}
+	inline void InitializeCriticalSectionAndSpinCount(CRITICAL_SECTION* cs, DWORD) { InitializeCriticalSection(cs); }
+	inline void DeleteCriticalSection(CRITICAL_SECTION* cs)
+	{
+		pthread_mutex_destroy(&cs->mutex);
+		cs->RecursionCount = 0;
+		cs->OwningThread = nullptr;
+	}
+	inline void EnterCriticalSection(CRITICAL_SECTION* cs)
+	{
+		pthread_mutex_lock(&cs->mutex);
+		cs->RecursionCount++;
+		cs->OwningThread = (void*)(DWORD_PTR)pthread_self();
+	}
+	inline void LeaveCriticalSection(CRITICAL_SECTION* cs)
+	{
+		if (cs->RecursionCount > 0) cs->RecursionCount--;
+		if (cs->RecursionCount == 0) cs->OwningThread = nullptr;
+		pthread_mutex_unlock(&cs->mutex);
+	}
+	inline BOOL TryEnterCriticalSection(CRITICAL_SECTION* cs)
+	{
+		if (pthread_mutex_trylock(&cs->mutex) == 0)
+		{
+			cs->RecursionCount++;
+			cs->OwningThread = (void*)(DWORD_PTR)pthread_self();
+			return TRUE;
+		}
+		return FALSE;
+	}
+	#else
+	inline void InitializeCriticalSection(CRITICAL_SECTION* cs) { cs->RecursionCount = 0; cs->OwningThread = nullptr; cs->LockCount = 0; cs->dummy = 0; }
+	inline void InitializeCriticalSectionAndSpinCount(CRITICAL_SECTION* cs, DWORD) { InitializeCriticalSection(cs); }
+	inline void DeleteCriticalSection(CRITICAL_SECTION* cs) { cs->RecursionCount = 0; cs->OwningThread = nullptr; }
+	inline void EnterCriticalSection(CRITICAL_SECTION* cs) { cs->RecursionCount++; }
+	inline void LeaveCriticalSection(CRITICAL_SECTION* cs) { if (cs->RecursionCount > 0) cs->RecursionCount--; if (cs->RecursionCount==0) cs->OwningThread=nullptr; }
+	inline BOOL TryEnterCriticalSection(CRITICAL_SECTION* cs) { cs->RecursionCount++; return TRUE; }
+	#endif
+
+	// IsDebuggerPresent -- Linux stub (always false, matches Valve dedicated server)
+	inline BOOL IsDebuggerPresent() { return FALSE; }
+
+	// Additional Win32 API stubs used by threadtools.cpp / assert_dialog.cpp on Linux
+	// These are minimal no-op / pthread-based shims to allow compilation with -D_LINUX.
+	// Real implementations would map to pthread, but for header compilation they just need to exist.
+	#ifndef _LINUX_SHIMS_DEFINED
+	#define _LINUX_SHIMS_DEFINED
+	// GetCurrentThreadId / GetCurrentThread / GetCurrentProcessId shims
+	#if defined(_TIER0_HAS_PTHREAD)
+	inline DWORD GetCurrentThreadId() { return (DWORD)(DWORD_PTR)pthread_self(); }
+	#else
+	inline DWORD GetCurrentThreadId() { return (DWORD)1; }
+	#endif
+	inline HANDLE GetCurrentThread() { return (HANDLE)(DWORD_PTR)GetCurrentThreadId(); }
+	#if defined(_MSC_VER) || defined(_TIER0_MINGW_LINUX)
+	inline DWORD GetCurrentProcessId() { return (DWORD)1; }
+	#else
+	inline DWORD GetCurrentProcessId() { return (DWORD)getpid(); }
+	#endif
+	#ifdef GetCurrentProcess
+	#undef GetCurrentProcess
+	#endif
+	inline HANDLE GetCurrentProcess() { return (HANDLE)(DWORD_PTR)GetCurrentProcessId(); }
+	#if defined(_MSC_VER) || defined(_TIER0_MINGW_LINUX)
+	inline DWORD GetTickCount() { return (DWORD)0; }
+	inline void Sleep(DWORD) {}
+	#else
+	inline DWORD GetTickCount() { struct timeval tv; gettimeofday(&tv, nullptr); return (DWORD)(tv.tv_sec*1000 + tv.tv_usec/1000); }
+	inline void Sleep(DWORD ms) { usleep(ms*1000); }
+	#endif
+	inline DWORD GetEnvironmentVariableA(LPCSTR, LPSTR, DWORD) { return 0; }
+	inline BOOL CloseHandle(HANDLE) { return TRUE; }
+	inline DWORD WaitForSingleObject(HANDLE, DWORD) { return 0; } // WAIT_OBJECT_0
+	inline DWORD WaitForMultipleObjects(DWORD, const HANDLE*, BOOL, DWORD) { return 0; }
+	#ifndef WAIT_OBJECT_0
+	#define WAIT_OBJECT_0 0
+	#define WAIT_TIMEOUT 258
+	#define WAIT_FAILED 0xFFFFFFFF
+	#define WAIT_ABANDONED_0 0x80
+	#define INFINITE 0xFFFFFFFF
+	#endif
+	#ifndef WAIT_ABANDONED
+	#define WAIT_ABANDONED WAIT_ABANDONED_0
+	#endif
+	inline HANDLE CreateMutexA(LPSECURITY_ATTRIBUTES, BOOL, LPCSTR) { return (HANDLE)1; }
+	inline HANDLE CreateEventA(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR) { return (HANDLE)1; }
+	inline HANDLE CreateSemaphoreA(LPSECURITY_ATTRIBUTES, LONG, LONG, LPCSTR) { return (HANDLE)1; }
+	inline BOOL ReleaseMutex(HANDLE) { return TRUE; }
+	inline BOOL SetEvent(HANDLE) { return TRUE; }
+	inline BOOL ResetEvent(HANDLE) { return TRUE; }
+	inline BOOL ReleaseSemaphore(HANDLE, LONG, LPLONG) { return TRUE; }
+	inline BOOL GetExitCodeThread(HANDLE, LPDWORD lp) { if(lp) *lp = STILL_ACTIVE; return TRUE; }
+	inline BOOL GetExitCodeProcess(HANDLE, LPDWORD lp) { if(lp) *lp = STILL_ACTIVE; return TRUE; }
+	inline HANDLE OpenProcess(DWORD, BOOL, DWORD) { return (HANDLE)0; }
+	inline int GetThreadPriority(HANDLE) { return 0; }
+	inline BOOL SetThreadPriority(HANDLE, int) { return TRUE; }
+	inline DWORD SuspendThread(HANDLE) { return 0; }
+	inline DWORD ResumeThread(HANDLE) { return 1; }
+	inline BOOL TerminateThread(HANDLE, DWORD) { return TRUE; }
+	inline DWORD TlsAlloc() { return 0; }
+	inline BOOL TlsFree(DWORD) { return TRUE; }
+	inline LPVOID TlsGetValue(DWORD) { return nullptr; }
+	inline BOOL TlsSetValue(DWORD, LPVOID) { return TRUE; }
+	inline DWORD GetLastError() { return 0; }
+	inline void OutputDebugStringA(LPCSTR) {}
+	#if defined(_MSC_VER)
+	// MSVC does not have __sync_*; provide simple non-atomic fallback (probe only)
+	inline LONG InterlockedCompareExchange(volatile LONG* dest, LONG exch, LONG comp) { LONG old = *dest; if (*dest == comp) *dest = exch; return old; }
+	inline LONG InterlockedExchange(volatile LONG* dest, LONG val) { LONG old = *dest; *dest = val; return old; }
+	inline LONG InterlockedIncrement(volatile LONG* dest) { return ++(*dest); }
+	inline LONG InterlockedDecrement(volatile LONG* dest) { return --(*dest); }
+	inline LONG InterlockedExchangeAdd(volatile LONG* dest, LONG val) { LONG old = *dest; *dest += val; return old; }
+	inline void* InterlockedExchangePointer(void* volatile* dest, void* val) { void* old = *dest; *dest = val; return old; }
+	inline void* InterlockedCompareExchangePointer(void* volatile* dest, void* exch, void* comp) { void* old = *dest; if (*dest == comp) *dest = exch; return old; }
+	inline LONG InterlockedAnd(volatile LONG* dest, LONG val) { LONG old = *dest; *dest &= val; return old; }
+	inline long long _InterlockedCompareExchange64(volatile long long* dest, long long exch, long long comp) { long long old = *dest; if (*dest == comp) *dest = exch; return old; }
+	#else
+	inline LONG InterlockedCompareExchange(volatile LONG* dest, LONG exch, LONG comp) { return __sync_val_compare_and_swap(dest, comp, exch); }
+	inline LONG InterlockedExchange(volatile LONG* dest, LONG val) { return __sync_lock_test_and_set(dest, val); }
+	inline LONG InterlockedIncrement(volatile LONG* dest) { return __sync_add_and_fetch(dest, 1); }
+	inline LONG InterlockedDecrement(volatile LONG* dest) { return __sync_sub_and_fetch(dest, 1); }
+	inline LONG InterlockedExchangeAdd(volatile LONG* dest, LONG val) { return __sync_fetch_and_add(dest, val); }
+	inline void* InterlockedExchangePointer(void* volatile* dest, void* val) { return __sync_lock_test_and_set(dest, val); }
+	inline void* InterlockedCompareExchangePointer(void* volatile* dest, void* exch, void* comp) { return __sync_val_compare_and_swap(dest, comp, exch); }
+	inline LONG InterlockedAnd(volatile LONG* dest, LONG val) { return __sync_fetch_and_and(dest, val); }
+	// _InterlockedCompareExchange64 as macro to avoid int64 forward-decl issue (works for any 64-bit type)
+	#ifndef _InterlockedCompareExchange64
+	#define _InterlockedCompareExchange64(dest, exch, comp) __sync_val_compare_and_swap((dest), (comp), (exch))
+	#endif
+	#endif
+	inline DWORD timeBeginPeriod(unsigned int) { return 0; }
+	inline DWORD timeEndPeriod(unsigned int) { return 0; }
+	// _beginthreadex shim (Windows process.h) -> pthread_create minimal stub
+	#if defined(_MSC_VER)
+	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
+	#else
+	inline unsigned long _beginthreadex(void*, unsigned, unsigned long (*)(void*), void*, unsigned, unsigned*) { return 0; }
+	#endif
+	// _mm_pause shim for Linux (avoid redefinition on MinGW/MSVC where it's builtin)
+	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__) && !defined(_MSC_VER)
+	inline void _mm_pause() { __asm__ __volatile__("pause"); }
+	#define _MM_PAUSE_DEFINED
+	#endif
+	#endif // _LINUX_SHIMS_DEFINED
+#elif defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
+	#ifndef _WIN32
+	#define _WIN32 1
+	#endif
+	#define WIN32 1
+	#ifndef _WIN32_WINNT
+	#define _WIN32_WINNT 0x0601
+	#endif
+	#include <windows.h>
 #else
 	// Unknown -- default to Windows for backward compat
 	#define WIN32 1
@@ -142,9 +419,17 @@
 #include <intrin.h>
 #else
 	// Linux: tchar is char (no _UNICODE wchar path on dedicated server)
-	#include <strings.h>
-	// __rdtsc fallback for CCycleCount
-	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED)
+	#ifndef _TIER0_MINGW_LINUX
+	#if defined(__has_include)
+	#  if __has_include(<strings.h>)
+	#    include <strings.h>
+	#  endif
+	#else
+	#  include <strings.h>
+	#endif
+	#endif // _TIER0_MINGW_LINUX
+	// __rdtsc fallback for CCycleCount (skip on MSVC/MinGW where it's builtin)
+	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED) && !defined(_MSC_VER) && !defined(__MINGW32__) && !defined(__MINGW64__)
 		#if defined(__i386__) || defined(__x86_64__)
 			inline unsigned long long __rdtsc()
 			{
