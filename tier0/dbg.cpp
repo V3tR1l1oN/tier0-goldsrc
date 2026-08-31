@@ -849,6 +849,17 @@ void* Plat_SimpleLog( const tchar* file, int line )
 	szBuf[len] = '\0';
 
 	s_SimpleLogMutex.Lock();
+#ifdef _LINUX
+	FILE* f = fopen( "simple.log", "a" );
+	if( !f )
+	{
+		s_SimpleLogMutex.Unlock();
+		return nullptr;
+	}
+	fwrite( szBuf, 1, (size_t)len, f );
+	fflush( f );
+	fclose( f );
+#else
 	HANDLE h = CreateFileA( "simple.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
 	if( h == INVALID_HANDLE_VALUE )
 	{
@@ -861,6 +872,7 @@ void* Plat_SimpleLog( const tchar* file, int line )
 	// Flush to disk atomically so crash right after log still persists (optional, low volume)
 	FlushFileBuffers( h );
 	CloseHandle( h );
+#endif
 	s_SimpleLogMutex.Unlock();
 	return nullptr;
 }
