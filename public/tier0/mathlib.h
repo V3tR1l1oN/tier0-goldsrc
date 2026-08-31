@@ -35,8 +35,8 @@ typedef vec_t vec4_t[4];
 typedef vec_t vec5_t[5];
 
 // Aligned helper for SSE loads
-typedef __declspec(align(16)) vec_t vec3a_t[4];
-typedef __declspec(align(16)) vec_t vec4a_t[4];
+typedef ALIGN16( vec_t ) vec3a_t[4];
+typedef ALIGN16( vec_t ) vec4a_t[4];
 
 //-----------------------------------------------------------------------------
 // Constants
