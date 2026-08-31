@@ -22,6 +22,9 @@
 #pragma warning( disable: 4091 )
 #include "minidump.h"
 #pragma warning( pop )
+#else
+#include "minidump.h"
+#endif
 
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
