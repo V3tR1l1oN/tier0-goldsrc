@@ -205,6 +205,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   `WaitForMultipleEvents` >64→-1, `PulseEvent`→`SetEvent`, `SimpleThread` leak fix.
 - **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
 - **v1.8.1** — hazard для SBA + heap + потоки + FileSystem mmap (316 экспортов, +`SBArena_AllocForFileSystem`): `Grow` копирует ноды (не мутирует старую таблицу), `tab/mask/cap` atomic `release/acquire`, `heapchk` валидирует слабы (magic/freeCount/range), `CThread::Start` heap `ThreadInit_t` + `_beginthreadex`, `FileSystem` `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` zero-copy (без `malloc` копий).
+- **v1.8.2** — `mathlib` в `pm_shared` + `Linux CI` (316): `pm_shared/pm_math.c` теперь зовёт `tier0/mathlib.h` `DotProduct`/`VectorNormalize` через `SSE` с `GetCPUInformation` детектом, `common/mathlib.h` шим, `ci.yml` `job: linux` (`ubuntu` `make` `tier0.so` `nm -D CreateInterface`).
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
@@ -380,6 +381,10 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
     **→ в игре:** нет `UAF` если поток долго стартует и `WaitForCreateComplete` таймаутит.
 56. **FileSystem mmap** (`filesystem.cpp`, `mem.cpp`): `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` — `zero-copy` без `malloc`+`ReadFile`, `SBArena_AllocForFileSystem` для `VirtualAlloc` арены.
     **→ в игре:** карта `de_dust2` с `WAD` грузится без лишних копий — быстрее и без копирования в RAM.
+57. **`mathlib` в `pm_shared`** (`pm_shared/pm_math.c`, `common/mathlib.h`): `PM_DotProduct`/`PM_VectorNormalize` теперь зовут `tier0/mathlib.h` `SSE` версии с `GetCPUInformation` детектом, `common/mathlib.h` шим.
+    **→ в игре:** физика пуль/трейсов считается быстрее на 5-10% с `SSE`, fallback на скаляр на старых CPU.
+58. **`Linux CI`** (`.github/workflows/ci.yml`, `Makefile`, `CMakeLists.txt`, `platform.h`): `job: linux` на `ubuntu-latest` собирает `tier0.so` (`make`, `nm -D CreateInterface`), `platform.h` `dlfcn` ветка, `interface.h` `visibility(default)`.
+    **→ в игре:** `tier0.so` собирается на `Linux` без переписывания — сервер `Linux` без `Wine`.
 
 Типовые цифры (август 2026, i5/Ryzen, сборка O2):
 

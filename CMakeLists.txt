@@ -14,12 +14,12 @@ add_definitions(-DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS)
 
 include_directories(public public/tier0 tier0)
 
-# Primary cross-platform units - platform.cpp is guaranteed via gettimeofday/clock_gettime
+# Primary cross-platform units - platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux
 # Extend SRCS as more modules gain _LINUX guards.
 set(SRCS
     tier0/platform.cpp
+    tier0/interface.cpp
     # tier0/cpu.cpp            # requires tier0/cpu_posix.cpp for POSIX path
-    # tier0/interface.cpp
     # tier0/mem.cpp
     # tier0/threadtools.cpp
 )

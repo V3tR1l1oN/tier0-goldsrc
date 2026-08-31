@@ -331,35 +331,42 @@ void SpewAndLogActivate( const tchar *pGroupName, int level, int logLevel )
 	}
 	else
 	{
+		// Default group also needs lock – readers (IsSpewActive etc.) race with this write.
+		s_SpewGroupsMutex.Lock();
 		s_DefaultLevel = level;
 		s_DefaultLogLevel = logLevel;
+		s_SpewGroupsMutex.Unlock();
 	}
 }
 
 void SpewAndLogChangeIfStillDefault( const tchar *pGroupName, int level, int leveldefault, int logLevel, int logLevelDefault )
 {
 	int index;
-
+	bool needActivate = false;
+	s_SpewGroupsMutex.Lock();
 	if( FindSpewGroup( pGroupName, &index ) )
 	{
 		auto pGroup = &s_pSpewGroups[ index ];
-
-		if( pGroup->m_Level == leveldefault && pGroup->m_LogLevel == logLevelDefault )
-			SpewAndLogActivate( pGroupName, level, logLevel );
+		needActivate = ( pGroup->m_Level == leveldefault && pGroup->m_LogLevel == logLevelDefault );
 	}
+	s_SpewGroupsMutex.Unlock();
+	if( needActivate )
+		SpewAndLogActivate( pGroupName, level, logLevel );
 }
 
 void SpewChangeIfStillDefault( const tchar *pGroupName, int level, int leveldefault )
 {
 	int index;
-
+	bool needActivate = false;
+	s_SpewGroupsMutex.Lock();
 	if( FindSpewGroup( pGroupName, &index ) )
 	{
 		auto pGroup = &s_pSpewGroups[ index ];
-
-		if( pGroup->m_Level == leveldefault )
-			SpewAndLogActivate( pGroupName, level, level );
+		needActivate = ( pGroup->m_Level == leveldefault );
 	}
+	s_SpewGroupsMutex.Unlock();
+	if( needActivate )
+		SpewAndLogActivate( pGroupName, level, level );
 }
 
 void SpewActivate( tchar const* pGroupName, int level )
@@ -369,30 +376,34 @@ void SpewActivate( tchar const* pGroupName, int level )
 
 bool IsLogActive( const tchar *pGroupName, int iLogLevel )
 {
-	int iLogLevelRequired = s_DefaultLogLevel;
-
+	int iLogLevelRequired;
+	s_SpewGroupsMutex.Lock();
+	iLogLevelRequired = s_DefaultLogLevel;
 	int index;
-
 	if( FindSpewGroup( pGroupName, &index ) )
 	{
 		iLogLevelRequired = s_pSpewGroups[ index ].m_LogLevel;
 	}
-
+	s_SpewGroupsMutex.Unlock();
 	return iLogLevelRequired >= iLogLevel;
 }
 
 bool IsSpewActive( tchar const* pGroupName, int level )
 {
 	int index;
-
-	if( FindSpewGroup( pGroupName, &index ) )
-	{
-		return level <= s_pSpewGroups[ index ].m_Level;
-	}
+	int active = 0;
+	int def = 0;
+	bool found = false;
+	s_SpewGroupsMutex.Lock();
+	found = FindSpewGroup( pGroupName, &index );
+	if( found )
+		active = s_pSpewGroups[ index ].m_Level;
+	def = s_DefaultLevel;
+	s_SpewGroupsMutex.Unlock();
+	if( found )
+		return level <= active;
 	else
-	{
-		return level <= s_DefaultLevel;
-	}
+		return level <= def;
 }
 
 void _SpewInfo( SpewType_t type, const tchar* pFile, int line )
@@ -513,18 +524,14 @@ SpewRetval_t _SpewMessage( const tchar* pMsgFormat, ... )
 
 SpewRetval_t _DSpewMessage( tchar const *pGroupName, int level, tchar const* pMsg, ... )
 {
-	int index;
-
 	bool bShouldLog;
-
+	s_SpewGroupsMutex.Lock();
+	int index;
 	if( FindSpewGroup( pGroupName, &index ) )
-	{
 		bShouldLog = level <= s_pSpewGroups[ index ].m_Level;
-	}
 	else
-	{
 		bShouldLog = level <= s_DefaultLevel;
-	}
+	s_SpewGroupsMutex.Unlock();
 
 	SpewRetval_t result = SPEW_CONTINUE;
 
@@ -559,18 +566,14 @@ void Msg( tchar const* pMsg, ... )
 
 void DMsg( tchar const* pGroupName, int level, tchar const* pMsg, ... )
 {
-	int index;
-
 	bool bShouldLog;
-
+	s_SpewGroupsMutex.Lock();
+	int index;
 	if( FindSpewGroup( pGroupName, &index ) )
-	{
 		bShouldLog = level <= s_pSpewGroups[ index ].m_Level;
-	}
 	else
-	{
 		bShouldLog = level <= s_DefaultLevel;
-	}
+	s_SpewGroupsMutex.Unlock();
 
 	if( bShouldLog )
 	{
@@ -585,18 +588,14 @@ void DMsg( tchar const* pGroupName, int level, tchar const* pMsg, ... )
 //TODO: temporary until linker issues with vstdlib are resolved - Solokiller
 DBG_INTERFACE void _DMsg( tchar const* pGroupName, int level, tchar const* pMsg, ... )
 {
-	int index;
-
 	bool bShouldLog;
-
+	s_SpewGroupsMutex.Lock();
+	int index;
 	if( FindSpewGroup( pGroupName, &index ) )
-	{
 		bShouldLog = level <= s_pSpewGroups[ index ].m_Level;
-	}
 	else
-	{
 		bShouldLog = level <= s_DefaultLevel;
-	}
+	s_SpewGroupsMutex.Unlock();
 
 	if( bShouldLog )
 	{
@@ -619,18 +618,14 @@ void Warning( tchar const *pMsg, ... )
 
 void DWarning( const tchar* pGroupName, int level, const tchar* pMsgFormat, ... )
 {
-	int index;
-
 	bool bShouldLog;
-
+	s_SpewGroupsMutex.Lock();
+	int index;
 	if( FindSpewGroup( pGroupName, &index ) )
-	{
 		bShouldLog = level <= s_pSpewGroups[ index ].m_Level;
-	}
 	else
-	{
 		bShouldLog = level <= s_DefaultLevel;
-	}
+	s_SpewGroupsMutex.Unlock();
 
 	if( bShouldLog )
 	{
@@ -653,18 +648,14 @@ void Log( tchar const *pMsg, ... )
 
 void DLog( const tchar* pGroupName, int level, const tchar* pMsgFormat, ... )
 {
-	int index;
-
 	bool bShouldLog;
-
+	s_SpewGroupsMutex.Lock();
+	int index;
 	if( FindSpewGroup( pGroupName, &index ) )
-	{
 		bShouldLog = level <= s_pSpewGroups[ index ].m_Level;
-	}
 	else
-	{
 		bShouldLog = level <= s_DefaultLevel;
-	}
+	s_SpewGroupsMutex.Unlock();
 
 	if( bShouldLog )
 	{
@@ -778,15 +769,39 @@ bool AssertValidStringPtr( const tchar* ptr, int maxchar )
 
 void* Plat_SimpleLog( const tchar* file, int line )
 {
-	FILE* pFile = fopen( "simple.log", "at+" );
+	// Fixed: make atomic via CreateFile+WriteFile with FILE_APPEND_DATA and a process-wide mutex.
+	// fopen("at+") used CRT buffering and was not atomic across threads/processes – concurrent
+	// callers interleaved or truncated. Now we use Win32 atomic append (FILE_APPEND_DATA guarantees
+	// the write lands at EOF atomically) plus a CThreadMutex to serialize formatting.
+	static CThreadMutex s_SimpleLogMutex;
+	char szBuf[ 512 ];
+	// TCHAR is char in narrow builds; handle generic via _sntprintf compatible formatting
+	int len = 0;
+#if TCHAR_IS_CHAR
+	len = _snprintf( szBuf, sizeof(szBuf)-1, "%s:%i\r\n", file ? file : "unknown", line );
+#else
+	// Wide build fallback – convert to UTF-8 via wide->narrow
+	char narrowFile[ 260 ] = {0};
+	if( file ) WideCharToMultiByte( CP_UTF8, 0, file, -1, narrowFile, sizeof(narrowFile)-1, NULL, NULL );
+	len = _snprintf( szBuf, sizeof(szBuf)-1, "%s:%i\r\n", narrowFile, line );
+#endif
+	if( len < 0 ) len = (int)sizeof(szBuf)-1;
+	if( (size_t)len >= sizeof(szBuf) ) len = (int)sizeof(szBuf)-1;
+	szBuf[len] = '\0';
 
-	// fopen fails when the CWD is not writable; _ftprintf(NULL, ...) would
-	// have dereferenced a null FILE*.
-	if( !pFile )
+	s_SimpleLogMutex.Lock();
+	HANDLE h = CreateFileA( "simple.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+	if( h == INVALID_HANDLE_VALUE )
+	{
+		s_SimpleLogMutex.Unlock();
 		return nullptr;
-
-	_ftprintf( pFile, _T( "%s:%i\n" ), file, line );
-	fclose( pFile );
-
+	}
+	DWORD written = 0;
+	// FILE_APPEND_DATA makes the write atomic at the filesystem level (no SetFilePointer needed)
+	WriteFile( h, szBuf, (DWORD)len, &written, NULL );
+	// Flush to disk atomically so crash right after log still persists (optional, low volume)
+	FlushFileBuffers( h );
+	CloseHandle( h );
+	s_SimpleLogMutex.Unlock();
 	return nullptr;
 }

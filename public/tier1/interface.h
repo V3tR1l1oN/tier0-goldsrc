@@ -14,7 +14,9 @@
 #pragma once
 #endif
 
+#if defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
 #include <windows.h>
+#endif
 #include "tier0/platform.h"
 
 //-----------------------------------------------------------------------------
@@ -70,9 +72,17 @@ public:
 // CreateInterface is exported from tier0.dll as ordinal @314.
 // It walks InterfaceReg::s_pInterfaceRegs and returns the matching interface.
 #if defined( TIER0_DLL_EXPORT )
-#define CREATEINTERFACE_API extern "C" __declspec(dllexport)
+  #if defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
+    #define CREATEINTERFACE_API extern "C" __declspec(dllexport)
+  #else
+    #define CREATEINTERFACE_API extern "C" __attribute__((visibility("default")))
+  #endif
 #else
-#define CREATEINTERFACE_API extern "C" __declspec(dllimport)
+  #if defined(_WIN32) || defined(WIN32) || defined(_WINDOWS)
+    #define CREATEINTERFACE_API extern "C" __declspec(dllimport)
+  #else
+    #define CREATEINTERFACE_API extern "C"
+  #endif
 #endif
 
 CREATEINTERFACE_API void* CreateInterface( const char *pName, int *pReturnCode );

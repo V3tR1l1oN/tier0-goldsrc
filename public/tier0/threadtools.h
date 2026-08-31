@@ -66,10 +66,21 @@ public:
 	CThreadLocalBase();
 	~CThreadLocalBase();
 
+	// Copy would share TLS index and cause double TlsFree on dtor.
+	// Explicitly deleted – use Duplicate() / new slot instead.
+	CThreadLocalBase( const CThreadLocalBase& other ) = delete;
+	CThreadLocalBase( CThreadLocalBase&& other ) = delete;
+	CThreadLocalBase& operator=( CThreadLocalBase&& other ) = delete;
+
 	void *Get() const;
 	void Set( void *value );
 
+	// Legacy ABI export @29: now duplicates slot (alloc new index + copy value)
+	// instead of sharing index which caused double TlsFree.
 	CThreadLocalBase& operator=( const CThreadLocalBase& other );
+
+	// Explicit duplicate helper (allocates new TLS slot with same thread's value)
+	bool DuplicateFrom( const CThreadLocalBase& other );
 
 public:
 	uint m_index;
@@ -104,6 +115,12 @@ public:
 };
 
 // CThreadSyncObject
+// NOTE: destructor is deliberately NOT virtual. Adding virtual would insert a vptr
+// at offset 0, shift m_hSyncObject by 4 bytes, change sizeof from 8 to 12, and
+// change mangling from ??1CThreadSyncObject@@QAE@XZ (@22) to UAE – breaking the
+// 313-order export table and every binary compiled against the old layout.
+// Deleting via base pointer is UB by design; keep dtor protected/non-virtual
+// and rely on derived dtors. See audit report for rationale.
 class PLATFORM_CLASS CThreadSyncObject
 {
 public:
@@ -281,6 +298,7 @@ public:
 
 	unsigned Suspend();
 	unsigned Resume();
+	[[deprecated("CThread::Terminate is deprecated – use cooperative Stop()+Join() / SetEvent+Join instead of TerminateThread")]]
 	bool Terminate( int result );
 
 	int GetPriority() const;

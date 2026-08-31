@@ -131,6 +131,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "bench failed: $LASTEXITCODE" }
           Select-String -Path bench.out -Pattern 'bench done' | ForEach-Object { $_.Line }
 
+  linux:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps (g++ make binutils)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make binutils
+
+      - name: Build tier0.so (Makefile)
+        run: make -f Makefile
+
+      - name: Verify build/tier0.so exists
+        run: |
+          test -f build/tier0.so || { echo "build/tier0.so not found"; exit 1; }
+          ls -lh build/tier0.so
+          file build/tier0.so
+
+      - name: Verify CreateInterface export (nm -D)
+        run: |
+          nm -D build/tier0.so | tee build/nm.txt
+          grep -q "CreateInterface" build/nm.txt || { echo "CreateInterface not found in nm -D"; exit 1; }
+          echo "CreateInterface: OK"
+
+      - name: Alternative CMake build smoke (optional)
+        run: |
+          cmake -B build_cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_cmake --config Release
+          test -f build_cmake/tier0.so || test -f build_cmake/build/tier0.so || echo "cmake build produced tier0.so elsewhere (non-fatal)"
+
   asan:
     runs-on: windows-latest
     continue-on-error: true

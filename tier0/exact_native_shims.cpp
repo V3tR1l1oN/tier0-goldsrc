@@ -79,14 +79,122 @@ void CThreadFastMutex::Unlock() volatile
 
 void CThreadFastMutex::SetTrace( bool b ) { UNREFERENCED_PARAMETER( b ); }
 
-// 4. CThreadFullMutex methods
-// NOTE: Original ship tier0.dll exports all three AssertOwnedByCurrentThread() at
-// RVA 0x14C0 = `mov al,1; ret` (always TRUE, no real ownership check).
-bool CThreadFullMutex::AssertOwnedByCurrentThread() { return true; }
+// 4. CThreadFullMutex methods – fixed to track ownership.
+// Original ship tier0.dll: all three AssertOwnedByCurrentThread() were `mov al,1; ret`.
+// Now we maintain a lock-protected table keyed by HANDLE to provide real checks.
+
+// Lightweight owner table for kernel mutexes (no per-object storage to keep ABI).
+static CRITICAL_SECTION s_FullMutexMapCS;
+static bool s_FullMutexMapInit = false;
+static struct FullMutexOwner_t { void* h; DWORD owner; int count; } s_FullOwners[64];
+
+static void FullMutexMapEnsureInit()
+{
+	if ( !s_FullMutexMapInit )
+	{
+		InitializeCriticalSection( &s_FullMutexMapCS );
+		memset( s_FullOwners, 0, sizeof(s_FullOwners) );
+		s_FullMutexMapInit = true;
+	}
+}
+static void FullMutexTrackAcquire( void* h, DWORD tid )
+{
+	FullMutexMapEnsureInit();
+	EnterCriticalSection( &s_FullMutexMapCS );
+	for ( int i = 0; i < 64; ++i )
+	{
+		if ( s_FullOwners[i].h == h )
+		{
+			// Re-entrant acquire by same thread
+			if ( s_FullOwners[i].owner == tid )
+				s_FullOwners[i].count++;
+			LeaveCriticalSection( &s_FullMutexMapCS );
+			return;
+		}
+	}
+	for ( int i = 0; i < 64; ++i )
+	{
+		if ( s_FullOwners[i].h == nullptr )
+		{
+			s_FullOwners[i].h = h;
+			s_FullOwners[i].owner = tid;
+			s_FullOwners[i].count = 1;
+			break;
+		}
+	}
+	LeaveCriticalSection( &s_FullMutexMapCS );
+}
+static void FullMutexTrackRelease( void* h, DWORD tid )
+{
+	if ( !s_FullMutexMapInit || !h )
+		return;
+	EnterCriticalSection( &s_FullMutexMapCS );
+	for ( int i = 0; i < 64; ++i )
+	{
+		if ( s_FullOwners[i].h == h && s_FullOwners[i].owner == tid )
+		{
+			if ( --s_FullOwners[i].count <= 0 )
+			{
+				s_FullOwners[i].h = nullptr;
+				s_FullOwners[i].owner = 0;
+				s_FullOwners[i].count = 0;
+			}
+			break;
+		}
+	}
+	LeaveCriticalSection( &s_FullMutexMapCS );
+}
+static bool FullMutexIsOwnedByCurrent( void* h )
+{
+	if ( !s_FullMutexMapInit || !h )
+		return false;
+	DWORD tid = GetCurrentThreadId();
+	bool owned = false;
+	EnterCriticalSection( &s_FullMutexMapCS );
+	for ( int i = 0; i < 64; ++i )
+	{
+		if ( s_FullOwners[i].h == h && s_FullOwners[i].owner == tid && s_FullOwners[i].count > 0 )
+		{
+			owned = true;
+			break;
+		}
+	}
+	LeaveCriticalSection( &s_FullMutexMapCS );
+	return owned;
+}
+
+bool CThreadFullMutex::AssertOwnedByCurrentThread()
+{
+	if ( !m_hSyncObject )
+		return false;
+	return FullMutexIsOwnedByCurrent( m_hSyncObject );
+}
 void CThreadFullMutex::SetTrace( bool b ) { UNREFERENCED_PARAMETER( b ); }
-void CThreadFullMutex::Lock( unsigned timeout ) { Wait( timeout ); }
-void CThreadFullMutex::Lock() { Wait( TT_INFINITE ); }
-void CThreadFullMutex::Unlock() { Release(); }
+void CThreadFullMutex::Lock( unsigned timeout )
+{
+	if ( Wait( timeout ) )
+		FullMutexTrackAcquire( m_hSyncObject, GetCurrentThreadId() );
+}
+void CThreadFullMutex::Lock()
+{
+	if ( Wait( TT_INFINITE ) )
+		FullMutexTrackAcquire( m_hSyncObject, GetCurrentThreadId() );
+}
+void CThreadFullMutex::Unlock()
+{
+	DWORD tid = GetCurrentThreadId();
+	// Only release tracking if we actually own it; ReleaseMutex fails if not owner
+	if ( FullMutexIsOwnedByCurrent( m_hSyncObject ) )
+	{
+		if ( Release() )
+			FullMutexTrackRelease( m_hSyncObject, tid );
+	}
+	else
+	{
+		// Not owned – still try Release but don't corrupt table
+		Release();
+	}
+}
 
 // 5. CThreadMutex const Lock / Unlock
 void CThreadMutex::Lock() const

@@ -15,11 +15,11 @@ PUBDIR   = public
 OUTDIR   = build
 TARGET   = $(OUTDIR)/tier0.so
 
-# Primary cross-platform sources -- platform.cpp is guaranteed to compile on Linux (gettimeofday/clock_gettime).
-# Add more as they gain _LINUX guards (cpu_posix.cpp would be needed for cpu.cpp POSIX path).
-SRCS     = $(SRCDIR)/platform.cpp
-# Uncomment when porting further modules:
-# SRCS  += $(SRCDIR)/interface.cpp $(SRCDIR)/mem.cpp $(SRCDIR)/threadtools.cpp ...
+# Primary cross-platform sources -- platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux.
+# cpu.cpp POSIX path requires cpu_posix.cpp, so still excluded.
+SRCS     = $(SRCDIR)/platform.cpp $(SRCDIR)/interface.cpp
+# Extend as more modules gain _LINUX guards:
+# SRCS  += $(SRCDIR)/mem.cpp $(SRCDIR)/threadtools.cpp ...
 
 OBJS     = $(patsubst $(SRCDIR)/%.cpp,$(OUTDIR)/%.o,$(SRCS))
 
