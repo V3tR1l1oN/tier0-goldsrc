@@ -393,10 +393,11 @@
 	inline DWORD timeBeginPeriod(unsigned int) { return 0; }
 	inline DWORD timeEndPeriod(unsigned int) { return 0; }
 	// _beginthreadex shim (Windows process.h) -> pthread_create minimal stub
+	// Windows signature: uintptr_t _beginthreadex(... unsigned (__stdcall*)(void*) ...)
 	#if defined(_MSC_VER)
 	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#else
-	inline unsigned long _beginthreadex(void*, unsigned, unsigned long (*)(void*), void*, unsigned, unsigned*) { return 0; }
+	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#endif
 	// _mm_pause shim for Linux (avoid redefinition on MSVC or where GCC provides
 	// it natively via <x86intrin.h>/<immintrin.h>)
