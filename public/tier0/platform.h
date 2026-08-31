@@ -388,8 +388,9 @@
 	#else
 	inline unsigned long _beginthreadex(void*, unsigned, unsigned long (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#endif
-	// _mm_pause shim for Linux (avoid redefinition on MinGW/MSVC where it's builtin)
-	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__) && !defined(_MSC_VER)
+	// _mm_pause shim for Linux (avoid redefinition on MinGW/MSVC or where GCC
+	// already provides <immintrin.h> _mm_pause)
+	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(_MSC_VER) && (!defined(__has_include) || !__has_include(<immintrin.h>))
 	inline void _mm_pause() { __asm__ __volatile__("pause"); }
 	#define _MM_PAUSE_DEFINED
 	#endif
@@ -435,8 +436,9 @@
 	#  include <strings.h>
 	#endif
 	#endif // _TIER0_MINGW_LINUX
-	// __rdtsc fallback for CCycleCount (skip on MSVC/MinGW where it's builtin)
-	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED) && !defined(_MSC_VER) && !defined(__MINGW32__) && !defined(__MINGW64__)
+	// __rdtsc fallback for CCycleCount (skip on MSVC/MinGW or where GCC provides
+	// it natively via <x86intrin.h>/<ia32intrin.h>)
+	#if !defined(__rdtsc) && !defined(__RDTSC_DEFINED) && !defined(_MSC_VER) && (!defined(__has_include) || (!__has_include(<x86intrin.h>) && !__has_include(<immintrin.h>)))
 		#if defined(__i386__) || defined(__x86_64__)
 			inline unsigned long long __rdtsc()
 			{
@@ -505,8 +507,10 @@ typedef uint64_t uint64;
 
 #ifdef _WIN32
 #define NOINLINE			__declspec( noinline )
+#define ALIGN16( def )		__declspec( align( 16 ) ) def
 #else
 #define NOINLINE			__attribute__((noinline))
+#define ALIGN16( def )		def __attribute__((aligned(16)))
 #endif
 
 #define DBG_CLASS
