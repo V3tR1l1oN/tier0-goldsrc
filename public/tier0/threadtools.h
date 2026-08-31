@@ -10,7 +10,7 @@
 #include "platform.h"
 #include "dbg.h"
 
-#ifdef WIN32
+#if defined(_WIN32) || defined(WIN32)
 #ifndef ARRAYSIZE
 #define ARRAYSIZE( p ) ( sizeof( p ) / sizeof( (p)[0] ) )
 #endif
@@ -224,7 +224,7 @@ public:
 	bool AssertOwnedByCurrentThread();
 	void SetTrace( bool );
 
-#if defined( _WIN32 )
+#if defined( _WIN32 ) || defined( _LINUX )
 	operator CRITICAL_SECTION *() { return reinterpret_cast<CRITICAL_SECTION *>( &m_CriticalSection ); }
 #endif
 
