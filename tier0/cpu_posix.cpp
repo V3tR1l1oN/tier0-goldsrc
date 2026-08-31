@@ -64,7 +64,7 @@ PLATFORM_INTERFACE const CPUInformation& GetCPUInformation()
 		pi.m_bFPU = 1;
 
 		__builtin_cpu_init();
-		pi.m_bRDTSC = __builtin_cpu_supports( "rdtsc" );
+		pi.m_bRDTSC = 1;
 		pi.m_bCMOV = __builtin_cpu_supports( "cmov" );
 		pi.m_bMMX = __builtin_cpu_supports( "mmx" );
 		pi.m_bSSE = __builtin_cpu_supports( "sse" );
