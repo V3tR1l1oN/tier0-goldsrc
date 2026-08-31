@@ -15,9 +15,9 @@ PUBDIR   = public
 OUTDIR   = build
 TARGET   = $(OUTDIR)/tier0.so
 
-# Full tier0 sources — try all tier0/*.cpp (each has _LINUX guards, fallback to stub on Linux).
-# Windows-only asm (fdumped_asm_exact.asm) is excluded.
-SRCS     = $(wildcard $(SRCDIR)/*.cpp)
+# Primary cross-platform sources -- platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux.
+# Full tier0/*.cpp requires porting tchar.h/strtools etc. — keep minimal for now (17KB SO).
+SRCS     = $(SRCDIR)/platform.cpp $(SRCDIR)/interface.cpp
 
 OBJS     = $(patsubst $(SRCDIR)/%.cpp,$(OUTDIR)/%.o,$(SRCS))
 

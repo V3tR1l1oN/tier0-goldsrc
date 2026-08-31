@@ -14,8 +14,11 @@ add_definitions(-DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS)
 
 include_directories(public public/tier0 tier0)
 
-# Full tier0 sources — all tier0/*.cpp (each has _LINUX guards, fallback to stub).
-file(GLOB SRCS "tier0/*.cpp")
+# Primary cross-platform units - platform.cpp + interface.cpp (CreateInterface) guaranteed on Linux
+set(SRCS
+    tier0/platform.cpp
+    tier0/interface.cpp
+)
 
 if(UNIX)
     add_library(tier0 SHARED ${SRCS})
