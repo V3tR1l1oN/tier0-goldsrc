@@ -323,4 +323,30 @@ void WriteMiniDumpForException( unsigned int uExceptionCode, struct _EXCEPTION_P
 PLATFORM_INTERFACE void WriteMiniDump()
 {
 }
+
+PLATFORM_INTERFACE void CatchAndWriteMiniDump( FnWMain pfn, int argc, tchar *argv[] )
+{
+	if( pfn )
+		pfn( argc, argv );
+}
+
+PLATFORM_INTERFACE void CatchAndWriteMiniDumpForVoidPtrFn( FnVoidPtrFn pvFn, FnMiniDump pfnMiniDump, bool bExitQuietly )
+{
+	if( pvFn )
+		pvFn();
+}
+
+bool BGetMiniDumpLock()
+{
+	return true;
+}
+
+int MiniDumpUnlock()
+{
+	return 0;
+}
+
+void WriteMiniDumpForException( unsigned int nExceptionCode, struct _EXCEPTION_POINTERS *pExceptionPointers )
+{
+}
 #endif

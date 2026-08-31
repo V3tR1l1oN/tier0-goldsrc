@@ -260,6 +260,7 @@ void ShutdownPME()
 
 static FnMiniDump g_UserMiniDumpFn = NULL;
 
+#ifdef _WIN32
 void SetMiniDumpFunction( FnMiniDump pfn )
 {
 	g_UserMiniDumpFn = pfn;
@@ -290,3 +291,9 @@ void CatchAndWriteMiniDumpForVoidPtrFn( FnVoidPtrFn pvFn, FnMiniDump pfnMiniDump
 	if ( bExitQuietly )
 		exit( -1 );
 }
+#else
+void SetMiniDumpFunction( FnMiniDump pfn )
+{
+	g_UserMiniDumpFn = pfn;
+}
+#endif
