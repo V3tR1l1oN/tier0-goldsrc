@@ -118,7 +118,7 @@ namespace
 			DeleteCriticalSection( &cs );
 			if ( base )
 #ifdef _LINUX
-				munmap( base, g_arena.reserve );
+				munmap( base, reserve );
 #else
 				VirtualFree( base, 0, MEM_RELEASE );
 #endif
