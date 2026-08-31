@@ -19,6 +19,11 @@
 #endif
 #endif
 
+#ifdef _LINUX
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 //Disable "'typedef ': ignored on left of '' when no variable is declared"
 #pragma warning( push )
 #pragma warning( disable: 4091 )
@@ -177,6 +182,7 @@ static bool IsValidStringPtrA( const char* ptr, SIZE_T maxChars )
 		return false;
 	if ( maxChars == 0 )
 		return true;
+#ifndef _LINUX
 	// Walk up to maxChars looking for NUL, validating readability page-by-page
 	const char* cur = ptr;
 	SIZE_T remaining = maxChars;
@@ -212,6 +218,34 @@ static bool IsValidStringPtrA( const char* ptr, SIZE_T maxChars )
 		cur += chunk;
 		remaining -= chunk;
 	}
+#else
+	// POSIX: validate readability page-by-page with mincore, then scan for NUL
+	// (no SEH on Linux; mincore guarantees committed readable pages beforehand).
+	size_t page = (size_t)sysconf( _SC_PAGESIZE );
+	if ( page == 0 )
+		page = 4096;
+	const char* cur = ptr;
+	SIZE_T remaining = maxChars;
+	while ( remaining > 0 )
+	{
+		size_t pageOff = (size_t)((uintptr_t)cur & (page - 1));
+		SIZE_T chunk = (SIZE_T)( page - pageOff );
+		if ( chunk > remaining )
+			chunk = remaining;
+		unsigned char vec = 0;
+		if ( mincore( (void*)((uintptr_t)cur & ~(uintptr_t)(page - 1)), page, &vec ) != 0 )
+			return false;
+		if ( ( vec & 1 ) == 0 )
+			return false;
+		for ( SIZE_T i = 0; i < chunk; ++i )
+		{
+			if ( cur[i] == '\0' )
+				return true;
+		}
+		cur += chunk;
+		remaining -= chunk;
+	}
+#endif
 	// No terminating NUL found within maxChars => still considered valid for legacy semantics (checks readability only)
 	// but if memory was readable up to maxChars, return true
 	return true;
