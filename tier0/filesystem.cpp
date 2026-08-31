@@ -2,13 +2,38 @@
 // Win32 implementation using CreateFile/ReadFile/FindFirstFile
 // GetReadBuffer: true zero-copy via CreateFileMapping/MapViewOfFile (mmap).
 // Fallback path uses SBArena_AllocForFileSystem (VirtualAlloc arena) instead of malloc.
+#ifdef _LINUX
+#define _GNU_SOURCE
+#endif
 #include "../public/tier1/interface.h"
+#ifdef _LINUX
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/mman.h>
+#include <fnmatch.h>
+#include <climits>
+#include <cerrno>
+#ifndef INVALID_HANDLE_VALUE
+#define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
+#endif
+#ifndef FILE_ATTRIBUTE_DIRECTORY
+#define FILE_ATTRIBUTE_DIRECTORY 0x10
+#endif
+#ifndef INVALID_FILE_ATTRIBUTES
+#define INVALID_FILE_ATTRIBUTES ((DWORD)-1)
+#endif
+#else
 #include <windows.h>
+#endif
 #include "../public/tier0/memalloc.h"
 
 // SBArena filesystem arena (exported from mem.cpp, VirtualAlloc-backed)
 extern "C" PLATFORM_INTERFACE void* SBArena_AllocForFileSystem(size_t nSize);
 extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nSize);
+#ifndef _LINUX
 #ifdef GetCurrentDirectory
 #undef GetCurrentDirectory
 #endif
@@ -36,6 +61,7 @@ extern "C" PLATFORM_INTERFACE void  SBArena_FreeForFileSystem(void* p, size_t nS
 #ifdef CreateFile
 #undef CreateFile
 #endif
+#endif // !_LINUX
 #include "../public/FileSystem.h"
 #include <vector>
 #include <string>
@@ -69,8 +95,13 @@ static std::string JoinPath(const std::string &a, const char *b)
 static bool FileExistsRaw(const char *path)
 {
 	if (!path || !path[0]) return false;
+#ifdef _LINUX
+	struct stat st;
+	return ::stat(path, &st) == 0;
+#else
 	DWORD attr = GetFileAttributesA(path);
 	return attr != INVALID_FILE_ATTRIBUTES;
+#endif
 }
 
 struct FileHandleInternal
@@ -86,11 +117,20 @@ struct FileHandleInternal
 
 struct FindHandleInternal
 {
+#ifdef _LINUX
+	DIR *pDir = nullptr;
+	bool valid = false;
+	std::string wildcard;
+	std::string baseDir;
+	char cFileName[MAX_PATH];
+	DWORD dwFileAttributes = 0;
+#else
 	HANDLE hFind = INVALID_HANDLE_VALUE;
 	WIN32_FIND_DATAA findData{};
 	bool valid = false;
 	std::string wildcard;
 	std::string baseDir;
+#endif
 };
 
 class CFileSystem : public IFileSystem
@@ -108,15 +148,23 @@ public:
 				{
 					if (fh->bIsMapped)
 					{
+#ifdef _LINUX
+						munmap(fh->pReadBuffer, fh->nBufferSize);
+#else
 						UnmapViewOfFile(fh->pReadBuffer);
 						if (fh->hMapping) CloseHandle(fh->hMapping);
+#endif
 					}
 					else
 					{
 						SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
 					}
 				}
+#ifdef _LINUX
+				{ int _fd = (int)(intptr_t)fh->hFile; if (_fd >= 0) ::close(_fd); }
+#else
 				if (fh->hFile != INVALID_HANDLE_VALUE) CloseHandle(fh->hFile);
+#endif
 				delete fh;
 			}
 		}
@@ -124,7 +172,11 @@ public:
 		{
 			if (fd)
 			{
+#ifdef _LINUX
+				if (fd->pDir) ::closedir(fd->pDir);
+#else
 				if (fd->hFind != INVALID_HANDLE_VALUE) ::FindClose(fd->hFind);
+#endif
 				delete fd;
 			}
 		}
@@ -161,6 +213,14 @@ public:
 	{
 		(void)pathID;
 		if (!pRelativePath) return;
+#ifdef _LINUX
+		::unlink(pRelativePath);
+		for (auto &sp : m_SearchPaths)
+		{
+			std::string full = JoinPath(sp, pRelativePath);
+			::unlink(full.c_str());
+		}
+#else
 		// try direct
 		DeleteFileA(pRelativePath);
 		for (auto &sp : m_SearchPaths)
@@ -168,6 +228,7 @@ public:
 			std::string full = JoinPath(sp, pRelativePath);
 			DeleteFileA(full.c_str());
 		}
+#endif
 	}
 	virtual void CreateDirHierarchy(const char *path, const char *pathID) override
 	{
@@ -200,7 +261,11 @@ public:
 					if (!cur.empty() && cur.back() != '\\' && cur.back() != '/')
 						cur += "\\";
 					cur += token;
+#ifdef _LINUX
+					::mkdir(cur.c_str(), 0755);
+#else
 					CreateDirectoryA(cur.c_str(), nullptr);
+#endif
 					token.clear();
 				}
 			}
@@ -224,6 +289,18 @@ public:
 	}
 	virtual bool IsDirectory(const char *pFileName) override
 	{
+#ifdef _LINUX
+		struct stat st;
+		if (::stat(pFileName, &st) == 0)
+			return S_ISDIR(st.st_mode);
+		for (auto &sp : m_SearchPaths)
+		{
+			std::string full = JoinPath(sp, pFileName);
+			if (::stat(full.c_str(), &st) == 0)
+				return S_ISDIR(st.st_mode);
+		}
+		return false;
+#else
 		std::string tryPath;
 		const char *toCheck = nullptr;
 		if (FileExistsRaw(pFileName))
@@ -244,6 +321,7 @@ public:
 		DWORD attr = GetFileAttributesA(toCheck);
 		if (attr == INVALID_FILE_ATTRIBUTES) return false;
 		return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#endif
 	}
 	virtual FileHandle_t Open(const char *pFileName, const char *pOptions, const char *pathID = 0) override
 	{
@@ -252,8 +330,78 @@ public:
 		bool bRead = (strchr(pOptions, 'r') != nullptr) || (strchr(pOptions, 'R') != nullptr);
 		bool bWrite = (strchr(pOptions, 'w') != nullptr) || (strchr(pOptions, 'W') != nullptr) || (strchr(pOptions, 'a') != nullptr) || (strchr(pOptions, 'A') != nullptr);
 		bool bPlus = (strchr(pOptions, '+') != nullptr);
-		// bool bText = (strchr(pOptions, 't') != nullptr);
-		// bool bBin = (strchr(pOptions, 'b') != nullptr);
+
+#ifdef _LINUX
+		int oflags = 0;
+		if (bWrite || bPlus)
+		{
+			if (strchr(pOptions,'w') || strchr(pOptions,'W'))
+				oflags = O_RDWR | O_CREAT | O_TRUNC;
+			else if (strchr(pOptions,'a') || strchr(pOptions,'A'))
+				oflags = O_RDWR | O_CREAT | O_APPEND;
+			else if (bPlus)
+				oflags = O_RDWR | O_CREAT;
+			else
+				oflags = O_WRONLY | O_CREAT | O_TRUNC;
+		}
+		else
+		{
+			oflags = O_RDONLY;
+		}
+		bool isWriteCreation = (oflags & O_CREAT) != 0;
+
+		// try to resolve file location for reading
+		std::string resolved = pFileName;
+		if (!isWriteCreation)
+		{
+			// reading: search search paths
+			if (!FileExistsRaw(pFileName))
+			{
+				bool found = false;
+				for (auto &sp : m_SearchPaths)
+				{
+					std::string full = JoinPath(sp, pFileName);
+					if (FileExistsRaw(full.c_str()))
+					{
+						resolved = full;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					resolved = pFileName;
+				}
+			}
+		}
+
+		int fd = ::open(resolved.c_str(), oflags, 0666);
+		if (fd < 0)
+		{
+			if (isWriteCreation)
+			{
+				char dir[MAX_PATH];
+				strncpy(dir, resolved.c_str(), MAX_PATH-1); dir[MAX_PATH-1]=0;
+				char *slash = strrchr(dir, '/');
+				if (slash)
+				{
+					*slash = 0;
+					CreateDirHierarchy(dir, nullptr);
+					fd = ::open(resolved.c_str(), oflags, 0666);
+				}
+			}
+			if (fd < 0)
+				return nullptr;
+		}
+
+		FileHandleInternal *fh = new FileHandleInternal();
+		fh->hFile = (HANDLE)(intptr_t)fd;
+		fh->bIsWrite = bWrite;
+		fh->fileName = resolved;
+		m_OpenFiles.push_back(fh);
+		return (FileHandle_t)fh;
+#else
+		bool bBin = (strchr(pOptions, 'b') != nullptr);
 		DWORD desiredAccess = 0;
 		if (bRead || bPlus) desiredAccess |= GENERIC_READ;
 		if (bWrite || bPlus)
@@ -292,28 +440,16 @@ public:
 				}
 				if (!found)
 				{
-					// file not found; for reading return nullptr
-					// still try to open direct to get proper error
 					resolved = pFileName;
 				}
 			}
-		}
-		else
-		{
-			// writing: if path is not absolute and we have search paths, prefer first search path? Valve does write to first write path.
-			// For simplicity, if pFileName doesn't contain ':' or leading slash, and we have search paths, prepend first search path?
-			// But to keep predictable for tests, keep direct path unless pathID handling wants search path.
-			// We'll keep direct.
 		}
 
 		HANDLE h = CreateFileA(resolved.c_str(), desiredAccess, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, creation, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (h == INVALID_HANDLE_VALUE)
 		{
-			// if reading and we tried resolved==pFileName but file exists via search path with different case? already handled.
-			// For writing with creation, try to create directory hierarchy
 			if (isWriteCreation)
 			{
-				// try to ensure directory exists
 				char dir[MAX_PATH];
 				strncpy(dir, resolved.c_str(), MAX_PATH-1); dir[MAX_PATH-1]=0;
 				char *slash = strrchr(dir, '\\');
@@ -342,6 +478,7 @@ public:
 		fh->fileName = resolved;
 		m_OpenFiles.push_back(fh);
 		return (FileHandle_t)fh;
+#endif
 	}
 	virtual void Close(FileHandle_t file) override
 	{
@@ -351,18 +488,28 @@ public:
 		{
 			if (fh->bIsMapped)
 			{
+#ifdef _LINUX
+				munmap(fh->pReadBuffer, fh->nBufferSize);
+#else
 				UnmapViewOfFile(fh->pReadBuffer);
 				if (fh->hMapping) CloseHandle(fh->hMapping);
+#endif
 			}
 			else
 			{
 				SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
 			}
 			fh->pReadBuffer=nullptr;
-			fh->hMapping=NULL;
 			fh->bIsMapped=false;
+#ifndef _LINUX
+			fh->hMapping=NULL;
+#endif
 		}
+#ifdef _LINUX
+		{ int _fd = (int)(intptr_t)fh->hFile; if (_fd >= 0) ::close(_fd); }
+#else
 		if (fh->hFile != INVALID_HANDLE_VALUE) CloseHandle(fh->hFile);
+#endif
 		// remove from open list
 		for (auto it = m_OpenFiles.begin(); it != m_OpenFiles.end(); ++it)
 		{
@@ -374,27 +521,45 @@ public:
 	{
 		if (!file) return;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		int whence = SEEK_SET;
+		if (seekType == FILESYSTEM_SEEK_CURRENT) whence = SEEK_CUR;
+		else if (seekType == FILESYSTEM_SEEK_TAIL) whence = SEEK_END;
+		::lseek((int)(intptr_t)fh->hFile, pos, whence);
+#else
 		DWORD method = FILE_BEGIN;
 		if (seekType == FILESYSTEM_SEEK_CURRENT) method = FILE_CURRENT;
 		else if (seekType == FILESYSTEM_SEEK_TAIL) method = FILE_END;
 		LARGE_INTEGER li; li.QuadPart = pos;
 		SetFilePointerEx(fh->hFile, li, nullptr, method);
+#endif
 	}
 	virtual unsigned int Tell(FileHandle_t file) override
 	{
 		if (!file) return 0;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		off_t pos = ::lseek((int)(intptr_t)fh->hFile, 0, SEEK_CUR);
+		return (pos < 0) ? 0 : (unsigned int)pos;
+#else
 		LARGE_INTEGER cur, zero; zero.QuadPart=0;
 		if (!SetFilePointerEx(fh->hFile, zero, &cur, FILE_CURRENT)) return 0;
 		return (unsigned int)cur.QuadPart;
+#endif
 	}
 	virtual unsigned int Size(FileHandle_t file) override
 	{
 		if (!file) return 0;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		struct stat st;
+		if (::fstat((int)(intptr_t)fh->hFile, &st) != 0) return 0;
+		return (unsigned int)st.st_size;
+#else
 		LARGE_INTEGER sz;
 		if (!GetFileSizeEx(fh->hFile, &sz)) return 0;
 		return (unsigned int)sz.QuadPart;
+#endif
 	}
 	virtual unsigned int Size(const char *pFileName) override
 	{
@@ -408,11 +573,18 @@ public:
 				if (FileExistsRaw(full.c_str())) { resolved = full; break; }
 			}
 		}
+#ifdef _LINUX
+		struct stat st;
+		if (::stat(resolved.c_str(), &st) != 0) return 0;
+		if (S_ISDIR(st.st_mode)) return 0;
+		return (unsigned int)st.st_size;
+#else
 		WIN32_FILE_ATTRIBUTE_DATA fad;
 		if (!GetFileAttributesExA(resolved.c_str(), GetFileExInfoStandard, &fad)) return 0;
 		if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
 		ULARGE_INTEGER ul; ul.LowPart = fad.nFileSizeLow; ul.HighPart = fad.nFileSizeHigh;
 		return (unsigned int)ul.QuadPart;
+#endif
 	}
 	virtual long int GetFileTime(const char *pFileName) override
 	{
@@ -423,10 +595,20 @@ public:
 			for (auto &sp : m_SearchPaths)
 			{
 				std::string full = JoinPath(sp, pFileName);
+#ifdef _LINUX
+				struct stat st;
+				if (::stat(full.c_str(), &st) == 0) { resolved = full; break; }
+#else
 				WIN32_FILE_ATTRIBUTE_DATA fad;
 				if (GetFileAttributesExA(full.c_str(), GetFileExInfoStandard, &fad)) { resolved = full; break; }
+#endif
 			}
 		}
+#ifdef _LINUX
+		struct stat st;
+		if (::stat(resolved.c_str(), &st) != 0) return 0;
+		return (long int)st.st_mtime;
+#else
 		WIN32_FILE_ATTRIBUTE_DATA fad;
 		if (!GetFileAttributesExA(resolved.c_str(), GetFileExInfoStandard, &fad)) return 0;
 		FILETIME ft = fad.ftLastWriteTime;
@@ -435,6 +617,7 @@ public:
 		ul.QuadPart -= 116444736000000000ULL;
 		ul.QuadPart /= 10000000ULL;
 		return (long int)ul.QuadPart;
+#endif
 	}
 	virtual void FileTimeToString(char *pStrip, int maxCharsIncludingTerminator, long fileTime) override
 	{
@@ -453,13 +636,21 @@ public:
 	{
 		if (!file) return false;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		return (int)(intptr_t)fh->hFile >= 0;
+#else
 		return fh->hFile != INVALID_HANDLE_VALUE;
+#endif
 	}
 	virtual void Flush(FileHandle_t file) override
 	{
 		if (!file) return;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		::fsync((int)(intptr_t)fh->hFile);
+#else
 		FlushFileBuffers(fh->hFile);
+#endif
 	}
 	virtual bool EndOfFile(FileHandle_t file) override
 	{
@@ -473,31 +664,52 @@ public:
 	{
 		if (!file || !pOutput || size<=0) return 0;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		ssize_t nRead = ::read((int)(intptr_t)fh->hFile, pOutput, size);
+		return (nRead < 0) ? 0 : (int)nRead;
+#else
 		DWORD read=0;
 		if (!ReadFile(fh->hFile, pOutput, (DWORD)size, &read, nullptr)) return 0;
 		return (int)read;
+#endif
 	}
 	virtual int Write(const void *pInput, int size, FileHandle_t file) override
 	{
 		if (!file || !pInput || size<=0) return 0;
 		FileHandleInternal *fh = (FileHandleInternal*)file;
+#ifdef _LINUX
+		ssize_t nWritten = ::write((int)(intptr_t)fh->hFile, pInput, size);
+		if (nWritten <= 0) return 0;
+#else
 		DWORD written=0;
 		if (!WriteFile(fh->hFile, pInput, (DWORD)size, &written, nullptr)) return 0;
+#endif
 		// invalidate cached read buffer if we wrote
 		if (fh->pReadBuffer)
 		{
 			if (fh->bIsMapped)
 			{
+#ifdef _LINUX
+				munmap(fh->pReadBuffer, fh->nBufferSize);
+#else
 				UnmapViewOfFile(fh->pReadBuffer);
 				if (fh->hMapping) CloseHandle(fh->hMapping);
+#endif
 			}
 			else
 			{
 				SBArena_FreeForFileSystem(fh->pReadBuffer, fh->nBufferSize);
 			}
-			fh->pReadBuffer=nullptr; fh->nBufferSize=0; fh->bIsMapped=false; fh->hMapping=NULL;
+			fh->pReadBuffer=nullptr; fh->nBufferSize=0; fh->bIsMapped=false;
+#ifndef _LINUX
+			fh->hMapping=NULL;
+#endif
 		}
+#ifdef _LINUX
+		return (int)nWritten;
+#else
 		return (int)written;
+#endif
 	}
 	virtual char *ReadLine(char *pOutput, int maxChars, FileHandle_t file) override
 	{
@@ -505,6 +717,31 @@ public:
 		FileHandleInternal *fh = (FileHandleInternal*)file;
 		int pos=0;
 		char c=0;
+#ifdef _LINUX
+		int fd = (int)(intptr_t)fh->hFile;
+		while (pos < maxChars-1)
+		{
+			ssize_t nRead = ::read(fd, &c, 1);
+			if (nRead <= 0) break;
+			if (c == '\n') { break; }
+			if (c == '\r')
+			{
+				// peek next char
+				char next=0;
+				ssize_t r2 = ::read(fd, &next, 1);
+				if (r2 == 1)
+				{
+					if (next != '\n')
+					{
+						// push back
+						::lseek(fd, -1, SEEK_CUR);
+					}
+				}
+				break;
+			}
+			pOutput[pos++]=c;
+		}
+#else
 		DWORD read=0;
 		while (pos < maxChars-1)
 		{
@@ -531,8 +768,8 @@ public:
 			}
 			pOutput[pos++]=c;
 		}
+#endif
 		if (pos==0 && EndOfFile(file)) return nullptr;
-		// if we hit EOF without reading anything, return nullptr?
 		if (pos==0)
 		{
 			// check if we actually read something but it was newline only? then return empty string
@@ -570,10 +807,49 @@ public:
 		unsigned int sz = Size(file);
 		if (sz==0 || sz==0xFFFFFFFF) { if(outBufferSize) *outBufferSize=0; return nullptr; }
 
+#ifdef _LINUX
+		// --- zero-copy path: mmap ---
+		int fd = (int)(intptr_t)fh->hFile;
+		void *pView = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+		if (pView != MAP_FAILED)
+		{
+			fh->pReadBuffer = pView;
+			fh->nBufferSize = (int)sz;
+			fh->bIsMapped = true;
+			if (outBufferSize) *outBufferSize = (int)sz;
+			return pView;
+		}
+
+		// --- fallback: SBArena + read ---
+		void *buf = SBArena_AllocForFileSystem(sz);
+		if (!buf) { if(outBufferSize) *outBufferSize=0; return nullptr; }
+		// save current pos
+		off_t curPos = ::lseek(fd, 0, SEEK_CUR);
+		::lseek(fd, 0, SEEK_SET);
+		ssize_t total = 0;
+		char *ptr = (char*)buf;
+		unsigned int remaining = sz;
+		while (remaining > 0)
+		{
+			size_t toRead = remaining > 8192 ? 8192 : remaining;
+			ssize_t nRead = ::read(fd, ptr + total, toRead);
+			if (nRead <= 0) break;
+			total += nRead;
+			remaining -= (unsigned int)nRead;
+		}
+		// restore pos
+		::lseek(fd, curPos, SEEK_SET);
+		if ((unsigned int)total != sz)
+		{
+			sz = (unsigned int)total;
+		}
+		fh->pReadBuffer = buf;
+		fh->nBufferSize = (int)sz;
+		fh->bIsMapped = false;
+		if (outBufferSize) *outBufferSize = (int)sz;
+		return buf;
+#else
 		// --- zero-copy path: try CreateFileMapping + MapViewOfFile (mmap) ---
-		// This is true zero-copy: OS maps file pages directly, no ReadFile memcpy.
-		// The view lives in the SBArena mmap address space and is cached until
-		// ReleaseReadBuffer / Close.
 		HANDLE hMap = CreateFileMappingA(fh->hFile, NULL, PAGE_READONLY, 0, 0, NULL);
 		if (hMap)
 		{
@@ -591,8 +867,6 @@ public:
 		}
 
 		// --- fallback: SBArena (VirtualAlloc arena) + ReadFile ---
-		// Still cached, but allocation comes from SBArena_AllocForFileSystem
-		// (VirtualAlloc page-aligned arena) instead of malloc.
 		void *buf = SBArena_AllocForFileSystem(sz);
 		if (!buf) { if(outBufferSize) *outBufferSize=0; return nullptr; }
 		// save current pos
@@ -623,6 +897,7 @@ public:
 		fh->bIsMapped = false;
 		if (outBufferSize) *outBufferSize = (int)sz;
 		return buf;
+#endif
 	}
 	virtual void ReleaseReadBuffer(FileHandle_t file, void *buffer) override
 	{
@@ -632,8 +907,12 @@ public:
 		{
 			if (fh->bIsMapped)
 			{
+#ifdef _LINUX
+				munmap(buffer, fh->nBufferSize);
+#else
 				UnmapViewOfFile(buffer);
 				if (fh->hMapping) CloseHandle(fh->hMapping);
+#endif
 			}
 			else
 			{
@@ -641,12 +920,18 @@ public:
 			}
 			fh->pReadBuffer = nullptr;
 			fh->nBufferSize = 0;
-			fh->hMapping = NULL;
 			fh->bIsMapped = false;
+#ifndef _LINUX
+			fh->hMapping = NULL;
+#endif
 		}
 		else
 		{
-			// not our cached buffer -- detect mapped vs arena
+			// not our cached buffer
+#ifdef _LINUX
+			SBArena_FreeForFileSystem(buffer, 0);
+#else
+			// detect mapped vs arena
 			MEMORY_BASIC_INFORMATION mbi;
 			if (VirtualQuery(buffer, &mbi, sizeof mbi) == sizeof mbi && mbi.Type == MEM_MAPPED)
 			{
@@ -656,6 +941,7 @@ public:
 			{
 				SBArena_FreeForFileSystem(buffer, 0);
 			}
+#endif
 		}
 	}
 	virtual const char *FindFirst(const char *pWildCard, FileFindHandle_t *pHandle, const char *pathID = 0) override
@@ -670,6 +956,83 @@ public:
 			std::string full = JoinPath(sp, pWildCard);
 			candidates.push_back(full);
 		}
+#ifdef _LINUX
+		DIR *pDir = nullptr;
+		std::string foundWildcard;
+		std::string dirPath;
+		std::string pattern;
+		for (auto &cand : candidates)
+		{
+			// extract directory and glob pattern from wildcard path
+			std::string path = cand;
+			size_t sepPos = path.find_last_of("/\\");
+			std::string d, pat;
+			if (sepPos != std::string::npos)
+			{
+				d = path.substr(0, sepPos);
+				pat = path.substr(sepPos + 1);
+			}
+			else
+			{
+				d = ".";
+				pat = path;
+			}
+			pDir = ::opendir(d.c_str());
+			if (pDir)
+			{
+				foundWildcard = cand;
+				dirPath = d;
+				pattern = pat;
+				break;
+			}
+		}
+		if (!pDir) { *pHandle = -1; return nullptr; }
+
+		FindHandleInternal *fhi = new FindHandleInternal();
+		fhi->pDir = pDir;
+		fhi->wildcard = foundWildcard;
+		fhi->baseDir = dirPath;
+		fhi->valid = false;
+
+		// read first entry matching pattern
+		struct dirent *entry;
+		while ((entry = ::readdir(pDir)) != nullptr)
+		{
+			// skip "." and ".." unless pattern starts with dot
+			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
+				continue;
+			if (fnmatch(pattern.c_str(), entry->d_name, FNM_CASEFOLD) != 0)
+				continue;
+			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
+			fhi->cFileName[MAX_PATH - 1] = '\0';
+			// stat to get attributes
+			std::string fullEntry = dirPath;
+			if (!fullEntry.empty() && fullEntry.back() != '/') fullEntry += '/';
+			fullEntry += entry->d_name;
+			struct stat st;
+			fhi->dwFileAttributes = 0;
+			if (::stat(fullEntry.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+				fhi->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+			fhi->valid = true;
+			break;
+		}
+
+		if (!fhi->valid)
+		{
+			::closedir(pDir);
+			delete fhi;
+			*pHandle = -1;
+			return nullptr;
+		}
+
+		// find slot
+		int idx = -1;
+		for (size_t i=0;i<m_FindHandles.size();++i) if (m_FindHandles[i]==nullptr) { idx=(int)i; break; }
+		if (idx==-1) { idx=(int)m_FindHandles.size(); m_FindHandles.push_back(fhi); }
+		else m_FindHandles[idx]=fhi;
+		*pHandle = idx;
+		return m_FindHandles[idx]->cFileName;
+#else
 		HANDLE hFind = INVALID_HANDLE_VALUE;
 		WIN32_FIND_DATAA fd{};
 		std::string foundWildcard;
@@ -695,26 +1058,62 @@ public:
 		else m_FindHandles[idx]=fhi;
 		*pHandle = idx;
 		return m_FindHandles[idx]->findData.cFileName;
+#endif
 	}
 	virtual const char *FindNext(FileFindHandle_t handle) override
 	{
 		if (handle<0 || handle >= (int)m_FindHandles.size() || !m_FindHandles[handle]) return nullptr;
 		FindHandleInternal *fhi = m_FindHandles[handle];
 		if (!fhi->valid) return nullptr;
+#ifdef _LINUX
+		// extract pattern from wildcard
+		std::string path = fhi->wildcard;
+		size_t sepPos = path.find_last_of("/\\");
+		std::string pattern = (sepPos != std::string::npos) ? path.substr(sepPos + 1) : path;
+		struct dirent *entry;
+		while ((entry = ::readdir(fhi->pDir)) != nullptr)
+		{
+			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
+				continue;
+			if (fnmatch(pattern.c_str(), entry->d_name, FNM_CASEFOLD) != 0)
+				continue;
+			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
+			fhi->cFileName[MAX_PATH - 1] = '\0';
+			// stat to get attributes
+			std::string fullEntry = fhi->baseDir;
+			if (!fullEntry.empty() && fullEntry.back() != '/') fullEntry += '/';
+			fullEntry += entry->d_name;
+			struct stat st;
+			fhi->dwFileAttributes = 0;
+			if (::stat(fullEntry.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+				fhi->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+			return fhi->cFileName;
+		}
+		return nullptr;
+#else
 		if (!FindNextFileA(fhi->hFind, &fhi->findData)) return nullptr;
 		return fhi->findData.cFileName;
+#endif
 	}
 	virtual bool FindIsDirectory(FileFindHandle_t handle) override
 	{
 		if (handle<0 || handle >= (int)m_FindHandles.size() || !m_FindHandles[handle]) return false;
 		FindHandleInternal *fhi = m_FindHandles[handle];
+#ifdef _LINUX
+		return (fhi->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
 		return (fhi->findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#endif
 	}
 	virtual void FindClose(FileFindHandle_t handle) override
 	{
 		if (handle<0 || handle >= (int)m_FindHandles.size() || !m_FindHandles[handle]) return;
 		FindHandleInternal *fhi = m_FindHandles[handle];
+#ifdef _LINUX
+		if (fhi->pDir) ::closedir(fhi->pDir);
+#else
 		if (fhi->hFind != INVALID_HANDLE_VALUE) ::FindClose(fhi->hFind);
+#endif
 		delete fhi;
 		m_FindHandles[handle]=nullptr;
 	}
@@ -732,6 +1131,19 @@ public:
 			}
 		}
 		// get full path
+#ifdef _LINUX
+		char fullPath[MAX_PATH];
+		if (::realpath(resolved.c_str(), fullPath) == nullptr)
+		{
+			strncpy(pLocalPath, resolved.c_str(), localPathBufferSize - 1);
+			pLocalPath[localPathBufferSize - 1] = '\0';
+		}
+		else
+		{
+			strncpy(pLocalPath, fullPath, localPathBufferSize - 1);
+			pLocalPath[localPathBufferSize - 1] = '\0';
+		}
+#else
 		char fullPath[MAX_PATH];
 		if (GetFullPathNameA(resolved.c_str(), MAX_PATH, fullPath, nullptr)==0)
 		{
@@ -741,6 +1153,7 @@ public:
 		{
 			strncpy_s(pLocalPath, localPathBufferSize, fullPath, _TRUNCATE);
 		}
+#endif
 		return pLocalPath;
 	}
 	virtual char *ParseFile(char *pFileBytes, char *pToken, bool *pWasQuoted) override
@@ -791,29 +1204,52 @@ public:
 			{
 				const char *rel = pFullpath + len;
 				while (*rel=='\\' || *rel=='/') rel++;
+#ifdef _LINUX
+				strncpy(pRelative, rel, MAX_PATH - 1);
+				pRelative[MAX_PATH - 1] = '\0';
+#else
 				strcpy_s(pRelative, MAX_PATH, rel);
+#endif
 				return true;
 			}
 		}
 		// fallback try GetCurrentDirectory prefix
 		char cur[MAX_PATH];
+#ifdef _LINUX
+		if (::getcwd(cur, sizeof(cur)) == nullptr) cur[0] = '\0';
+#else
 		GetCurrentDirectoryA(MAX_PATH, cur);
+#endif
 		size_t curLen = strlen(cur);
 		if (_strnicmp(pFullpath, cur, curLen)==0)
 		{
 			const char *rel = pFullpath + curLen;
 			while (*rel=='\\' || *rel=='/') rel++;
+#ifdef _LINUX
+			strncpy(pRelative, rel, MAX_PATH - 1);
+			pRelative[MAX_PATH - 1] = '\0';
+#else
 			strcpy_s(pRelative, MAX_PATH, rel);
+#endif
 			return true;
 		}
+#ifdef _LINUX
+		strncpy(pRelative, pFullpath, MAX_PATH - 1);
+		pRelative[MAX_PATH - 1] = '\0';
+#else
 		strcpy_s(pRelative, MAX_PATH, pFullpath);
+#endif
 		return false;
 	}
 	virtual bool GetCurrentDirectory(char *pDirectory, int maxlen) override
 	{
 		if (!pDirectory || maxlen<=0) return false;
+#ifdef _LINUX
+		return ::getcwd(pDirectory, maxlen) != nullptr;
+#else
 		DWORD len = ::GetCurrentDirectoryA(maxlen, pDirectory);
 		return len>0 && len < (DWORD)maxlen;
+#endif
 	}
 	virtual void PrintOpenedFiles() override
 	{
@@ -838,7 +1274,12 @@ public:
 	virtual void GetInterfaceVersion(char *p, int maxlen) override
 	{
 		if (!p || maxlen<=0) return;
+#ifdef _LINUX
+		strncpy(p, FILESYSTEM_INTERFACE_VERSION, maxlen - 1);
+		p[maxlen - 1] = '\0';
+#else
 		strncpy_s(p, maxlen, FILESYSTEM_INTERFACE_VERSION, _TRUNCATE);
+#endif
 	}
 	virtual bool IsFileImmediatelyAvailable(const char *pFileName) override
 	{
