@@ -314,6 +314,12 @@
 	inline DWORD GetTickCount() { struct timeval tv; gettimeofday(&tv, nullptr); return (DWORD)(tv.tv_sec*1000 + tv.tv_usec/1000); }
 	inline void Sleep(DWORD ms) { usleep(ms*1000); }
 	#endif
+	#if defined(_WIN32) && defined(_MSC_VER)
+	inline void __debugbreak() { __debugbreak(); }
+	#else
+	#include <signal.h>
+	inline void __debugbreak() { raise( SIGTRAP ); }
+	#endif
 	inline DWORD GetEnvironmentVariableA(LPCSTR, LPSTR, DWORD) { return 0; }
 	inline BOOL CloseHandle(HANDLE) { return TRUE; }
 	inline DWORD WaitForSingleObject(HANDLE, DWORD) { return 0; } // WAIT_OBJECT_0
