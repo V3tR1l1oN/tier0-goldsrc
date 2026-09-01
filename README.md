@@ -116,6 +116,14 @@ BUILD OK: ...\build\tier0.dll
 D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 ```
 
+На `Linux` — `build/tier0.so` рядом с `hlds_linux`/`hlds_run` (там где лежит оригинальный `tier0.so`):
+
+```
+~/hlds_l/cstrike/tier0.so  # или рядом с hlds_linux
+```
+
+`Linux` сборка — полный `1:1` аналог `Windows` `tier0.dll` (тот же `316` экспортов, `mmap` вместо `VirtualAlloc`, `pthread` вместо `Win32` тредов) — можно кидать также, будет работать лучше/стабильнее чем оригинал (меньше фризов, ровный тик).
+
 Проверено на CS 1.6: `hl.exe -game cstrike` загружается и работает стабильно,
 `crash.log` не создаётся, профилирование `-vprof` работает. Дополнительно
 прогнан смоук на Dedicated Server (`hlds.exe`, билд 10210, `cstrike` 1.1.2.7):
@@ -205,7 +213,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
   `WaitForMultipleEvents` >64→-1, `PulseEvent`→`SetEvent`, `SimpleThread` leak fix.
 - **v1.8.0** — 4 прорыва без ломки ABI (314 экспортов, +`CreateInterface`): фабрика `CreateInterface`/`InterfaceReg` (`tier1/interface.h`), `IFileSystem V009` 54 виртуалки с `GetReadBuffer` zero-copy и `pathID` (-30% `fopen`), кроссплатформа `platform.h` ветка `dlfcn` + `Makefile`/`CMake` для `tier0.so`, `mathlib` SIMD `VectorNormalize`/`DotProduct` с `SSE/AVX` детектом — `tier0` как в `Source`.
 - **v1.8.1** — hazard для SBA + heap + потоки + FileSystem mmap (316 экспортов, +`SBArena_AllocForFileSystem`): `Grow` копирует ноды (не мутирует старую таблицу), `tab/mask/cap` atomic `release/acquire`, `heapchk` валидирует слабы (magic/freeCount/range), `CThread::Start` heap `ThreadInit_t` + `_beginthreadex`, `FileSystem` `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` zero-copy (без `malloc` копий).
-- **v1.8.2** — `mathlib` в `pm_shared` + `Linux CI` (316): `pm_shared/pm_math.c` теперь зовёт `tier0/mathlib.h` `DotProduct`/`VectorNormalize` через `SSE` с `GetCPUInformation` детектом, `common/mathlib.h` шим, `ci.yml` `job: linux` (`ubuntu` `make` `tier0.so` `nm -D CreateInterface`).
+- **v1.8.2** — `mathlib` в `pm_shared` + `Linux CI` (316): `pm_shared/pm_math.c` теперь зовёт `tier0/mathlib.h` `DotProduct`/`VectorNormalize` через `SSE` с `GetCPUInformation` детектом, `common/mathlib.h` шим, `ci.yml` `job: linux` (`ubuntu` `make` `tier0.so` `nm -D CreateInterface`), `tier0.so` полный 1:1 (206КБ, как `tier0.dll` для `Linux` — кидай на дедик вместо оригинала, будет быстрее/стабильнее).
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
