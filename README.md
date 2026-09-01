@@ -217,6 +217,7 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 - **v1.8.1** — hazard для SBA + heap + потоки + FileSystem mmap (316 экспортов, +`SBArena_AllocForFileSystem`): `Grow` копирует ноды (не мутирует старую таблицу), `tab/mask/cap` atomic `release/acquire`, `heapchk` валидирует слабы (magic/freeCount/range), `CThread::Start` heap `ThreadInit_t` + `_beginthreadex`, `FileSystem` `GetReadBuffer` через `CreateFileMapping`/`MapViewOfFile` zero-copy (без `malloc` копий).
 - **v1.8.2** — `mathlib` в `pm_shared` + `Linux CI` (316): `pm_shared/pm_math.c` теперь зовёт `tier0/mathlib.h` `DotProduct`/`VectorNormalize` через `SSE` с `GetCPUInformation` детектом, `common/mathlib.h` шим, `ci.yml` `job: linux` (`ubuntu` `make` `tier0.so` `nm -D CreateInterface`), `tier0.so` полный 1:1 (206КБ, как `tier0.dll` для `Linux` — кидай на дедик вместо оригинала, будет быстрее/стабильнее).
 - **v1.8.3** — `всё и сразу` `Win+Linux` без ломки `ABI` (316): `IsAccessibleSpan` `mincore` на `Linux`, `Tls` `pthread_key_t`, `fnmatch` кеш, `mathlib` `AVX` (`_mm256_*`), `PreciseSleep` `clock_nanosleep`, `validator`/`vprof`/`testthread`/`tlhelp32` `/proc`/`prctl` — все `tier0/*.cpp` в `tier0.so` (`207КБ`), `SBA` `mprotect` + `LD_PRELOAD` guard, `CI` `linux-asan`.
+- **v1.8.4** — `install.sh` `chmod +x` + доки: авто-установка `tier0.so` на `Linux` дедик одной командой.
 
 Релиз `v1.0.0` хранит оригинальный артефакт; все последующие релизы в описании
 помечаются как модификация. Тег `v1.0.0` даёт доступ к исходникам оригинала
