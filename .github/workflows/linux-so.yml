@@ -20,7 +20,7 @@ jobs:
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y g++ make binutils
       - name: Build tier0.so
-        run: make -f Makefile && ls -lh build/tier0.so && file build/tier0.so && nm -D build/tier0.so | grep -q CreateInterface
+        run: make -f Makefile && ls -lh build/tier0.so && file build/tier0.so && nm -D build/tier0.so | grep -q CreateInterface && echo "exports $(nm -D build/tier0.so | grep -c ' T ') -> 316 expected (nm count != dumpbin)" && ldd build/tier0.so
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
