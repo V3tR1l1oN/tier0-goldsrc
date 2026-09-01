@@ -14,11 +14,8 @@ add_definitions(-DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS)
 
 include_directories(public public/tier0 tier0)
 
-# Full tier0 sources — all tier0/*.cpp (test harnesses excluded on Linux)
+# Full tier0 sources — all tier0/*.cpp (100% 1:1, включая testthread)
 file(GLOB SRCS "tier0/*.cpp")
-if(UNIX)
-    list(REMOVE_ITEM SRCS "${CMAKE_SOURCE_DIR}/tier0/testthread.cpp" "${CMAKE_SOURCE_DIR}/tier0/testthread2.cpp")
-endif()
 
 if(UNIX)
     add_library(tier0 SHARED ${SRCS})

@@ -321,6 +321,21 @@ void WriteMiniDumpForException( unsigned int uExceptionCode, struct _EXCEPTION_P
 
 #else
 #include "minidump.h" // POSIX: provides FnWMain/FnVoidPtrFn/FnMiniDump + EXCEPTION_POINTERS fwd
+#ifdef _LINUX
+#if defined(__has_include)
+#if __has_include(<sys/prctl.h>)
+#include <sys/prctl.h>
+#endif
+#else
+#include <sys/prctl.h>
+#endif
+#ifndef PR_SET_DUMPABLE
+#define PR_SET_DUMPABLE 4
+#endif
+#ifndef PR_GET_DUMPABLE
+#define PR_GET_DUMPABLE 3
+#endif
+#endif
 PLATFORM_INTERFACE void WriteMiniDump()
 {
 }
@@ -349,5 +364,18 @@ int MiniDumpUnlock()
 
 void WriteMiniDumpForException( unsigned int nExceptionCode, struct _EXCEPTION_POINTERS *pExceptionPointers )
 {
+#ifdef _LINUX
+	// Enable core dumps: prctl(PR_SET_DUMPABLE,1) allows the kernel to write
+	// core files even after setuid/setgid or other dumpable restrictions.
+#if !defined(_TIER0_MINGW_LINUX)
+#if defined(__has_include) && __has_include(<sys/prctl.h>)
+	prctl(PR_SET_DUMPABLE, 1);
+#elif defined(__linux__)
+	prctl(PR_SET_DUMPABLE, 1);
+#endif
+#endif
+#endif
+	(void)nExceptionCode;
+	(void)pExceptionPointers;
 }
 #endif
