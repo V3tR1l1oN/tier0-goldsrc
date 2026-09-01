@@ -228,7 +228,7 @@ jobs:
           sudo apt-get install -y g++ make binutils
 
       - name: Build tier0.so with ASan
-        run: CXXFLAGS="-O1 -g -fsanitize=address -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address -shared -fPIC" make -f Makefile
+        run: CXXFLAGS="-O1 -g -fsanitize=address -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address" make -f Makefile
 
       - name: Verify build/tier0.so exists (ASan)
         run: |

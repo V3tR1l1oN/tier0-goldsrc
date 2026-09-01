@@ -7,7 +7,7 @@ CXX      ?= g++
 CXXFLAGS ?= -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-unknown-pragmas
 CPPFLAGS ?= -D_LINUX -DPOSIX -DLINUX -D_POSIX -DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS
 INCLUDES  = -Ipublic -Ipublic/tier0 -Itier0
-LDFLAGS  ?= -shared -fPIC
+LDFLAGS  += -shared -fPIC
 LDLIBS   ?= -ldl -lpthread -lm -lrt
 
 SRCDIR   = tier0
