@@ -15,9 +15,11 @@
 #endif
 #else
 // Linux: need time headers for Plat_FloatTime (gettimeofday / clock_gettime)
+// PreciseSleep on Linux uses clock_nanosleep(CLOCK_MONOTONIC,0,&ts,NULL) for 10.02ms QPC-parity (replaces usleep/Sleep)
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 #ifndef ARRAYSIZE
 #define ARRAYSIZE( p ) ( sizeof(p) / sizeof((p)[0]) )
 #endif
@@ -207,3 +209,15 @@ double Plat_FloatTime()
 	}
 #endif
 }
+
+#if defined(_LINUX) || defined(POSIX)
+// PreciseSleep helper for Linux parity with Windows QPC spin (10.02ms).
+// Replaces Sleep/usleep with clock_nanosleep(CLOCK_MONOTONIC,0,&ts,NULL) for monotonic precise sleep.
+PLATFORM_INTERFACE void Plat_PreciseSleep( unsigned ms )
+{
+	struct timespec ts;
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)( (ms % 1000) * 1000000L );
+	while ( clock_nanosleep( CLOCK_MONOTONIC, 0, &ts, NULL ) == -1 && errno == EINTR ) {}
+}
+#endif

@@ -1693,10 +1693,19 @@ static bool IsAccessibleSpan( const void* pMem, size_t size, int bWrite )
 		return false;
 
 #ifdef _LINUX
-	// Best-effort access validator. The Windows VirtualQuery/commit/protect
-	// semantics have no direct POSIX equivalent; these checks are defensive
-	// (kernel-enforced page protection still faults on genuinely bad access),
-	// so report true for any well-formed pointer without probing.
+	size_t page = (size_t)sysconf( _SC_PAGESIZE );
+	if ( page == 0 )
+		page = 4096;
+	const uintptr_t start = (uintptr_t)pMem;
+	const uintptr_t endp = start + (uintptr_t)size;
+	for ( uintptr_t p = start & ~(uintptr_t)( page - 1 ); p < endp; p += page )
+	{
+		unsigned char vec = 0;
+		if ( mincore( (void*)p, page, &vec ) != 0 )
+			return false;
+		if ( ( vec & 1 ) == 0 )
+			return false;
+	}
 	return true;
 #else
 	MEMORY_BASIC_INFORMATION mbi;

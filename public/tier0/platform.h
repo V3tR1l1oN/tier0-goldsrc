@@ -361,10 +361,14 @@
 	inline DWORD SuspendThread(HANDLE) { return 0; }
 	inline DWORD ResumeThread(HANDLE) { return 1; }
 	inline BOOL TerminateThread(HANDLE, DWORD) { return TRUE; }
-	inline DWORD TlsAlloc() { return 0; }
-	inline BOOL TlsFree(DWORD) { return TRUE; }
-	inline LPVOID TlsGetValue(DWORD) { return nullptr; }
-	inline BOOL TlsSetValue(DWORD, LPVOID) { return TRUE; }
+#if !defined(_TIER0_HAS_PTHREAD)
+#include <pthread.h>
+#define _TIER0_HAS_PTHREAD 1
+#endif
+	inline DWORD TlsAlloc() { pthread_key_t k; return pthread_key_create( &k, nullptr ) == 0 ? (DWORD)k : (DWORD)0xFFFFFFFF; }
+	inline BOOL TlsFree(DWORD idx) { return pthread_key_delete( (pthread_key_t)idx ) == 0 ? TRUE : FALSE; }
+	inline LPVOID TlsGetValue(DWORD idx) { return pthread_getspecific( (pthread_key_t)idx ); }
+	inline BOOL TlsSetValue(DWORD idx, LPVOID val) { return pthread_setspecific( (pthread_key_t)idx, val ) == 0 ? TRUE : FALSE; }
 	inline DWORD GetLastError() { return 0; }
 	inline void OutputDebugStringA(LPCSTR) {}
 	#if defined(_MSC_VER)
