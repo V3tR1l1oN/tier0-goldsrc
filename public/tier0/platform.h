@@ -361,14 +361,21 @@
 	inline DWORD SuspendThread(HANDLE) { return 0; }
 	inline DWORD ResumeThread(HANDLE) { return 1; }
 	inline BOOL TerminateThread(HANDLE, DWORD) { return TRUE; }
-#if !defined(_TIER0_HAS_PTHREAD)
+#if !defined(_TIER0_HAS_PTHREAD) && !defined(_TIER0_MINGW_LINUX)
 #include <pthread.h>
 #define _TIER0_HAS_PTHREAD 1
 #endif
+#if defined(_TIER0_MINGW_LINUX)
+	inline DWORD TlsAlloc() { return (DWORD)0xFFFFFFFF; }
+	inline BOOL TlsFree(DWORD) { return FALSE; }
+	inline LPVOID TlsGetValue(DWORD) { return nullptr; }
+	inline BOOL TlsSetValue(DWORD, LPVOID) { return FALSE; }
+#else
 	inline DWORD TlsAlloc() { pthread_key_t k; return pthread_key_create( &k, nullptr ) == 0 ? (DWORD)k : (DWORD)0xFFFFFFFF; }
 	inline BOOL TlsFree(DWORD idx) { return pthread_key_delete( (pthread_key_t)idx ) == 0 ? TRUE : FALSE; }
 	inline LPVOID TlsGetValue(DWORD idx) { return pthread_getspecific( (pthread_key_t)idx ); }
 	inline BOOL TlsSetValue(DWORD idx, LPVOID val) { return pthread_setspecific( (pthread_key_t)idx, val ) == 0 ? TRUE : FALSE; }
+#endif
 	inline DWORD GetLastError() { return 0; }
 	inline void OutputDebugStringA(LPCSTR) {}
 	#if defined(_MSC_VER)
@@ -400,11 +407,14 @@
 	inline DWORD timeEndPeriod(unsigned int) { return 0; }
 	// _beginthreadex shim (Windows process.h) -> pthread_create minimal stub
 	// Windows signature: uintptr_t _beginthreadex(... unsigned (__stdcall*)(void*) ...)
+	// On MinGW Linux skip to avoid conflict with <process.h> (already declares it with _WIN32)
+#if !defined(_TIER0_MINGW_LINUX)
 	#if defined(_MSC_VER)
 	inline uintptr_t _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#else
 	inline void* _beginthreadex(void*, unsigned, unsigned (*)(void*), void*, unsigned, unsigned*) { return 0; }
 	#endif
+#endif
 	// _mm_pause shim for Linux (avoid redefinition on MSVC or where GCC provides
 	// it natively via <x86intrin.h>/<immintrin.h>)
 	#if !defined(_MM_PAUSE_DEFINED) && !defined(_WIN32) && !defined(_MSC_VER) && !defined(_TIER0_X86INTRIN)

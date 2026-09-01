@@ -12,6 +12,32 @@
 #include "testthread.h"
 #include "threadtools.h"
 
+#ifdef _LINUX
+#include <string.h>
+#include <stdio.h>
+#ifndef _T
+#define _T(x) x
+#endif
+#ifndef _sntprintf
+#define _sntprintf snprintf
+#endif
+#ifndef _vsntprintf
+#define _vsntprintf vsnprintf
+#endif
+#ifndef strncpy_s
+// Valve _TRUNCATE uses destSize; emulate via strncpy + NUL-terminate. Returns 0 on success.
+#define strncpy_s(dst, dstSize, src, count) (strncpy((dst), (src), ((count)==_TRUNCATE ? (dstSize)-1 : (count))), (dst)[(dstSize)-1]='\0', 0)
+#endif
+#ifndef _TRUNCATE
+#define _TRUNCATE ((size_t)-1)
+#endif
+// Minimal CreateThread shim for -D_LINUX: test harness is no-op on Linux (see Test_RunTest below)
+// Real pthread_create mapping would require thread proc conversion; stub is sufficient for compilation and 1:1 inclusion.
+#ifndef CreateThread
+inline HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, DWORD (WINAPI *)(LPVOID), LPVOID, DWORD, LPDWORD) { return (HANDLE)1; }
+#endif
+#endif
+
 #ifdef WIN32
 #ifndef ARRAYSIZE
 #define ARRAYSIZE( p ) ( sizeof( p ) / sizeof( (p)[0] ) )
@@ -156,6 +182,10 @@ static TestThreadInfo_t g_TestThreadInfo =
 
 static DWORD WINAPI TestThreadProc( LPVOID pvArg )
 {
+#ifdef _LINUX
+	UNREFERENCED_PARAMETER( pvArg );
+	return 0;
+#else
 	g_TestHarness.m_bTestThreadRunning = true;
 
 	while ( !g_TestHarness.m_bStopTestThread )
@@ -175,10 +205,17 @@ static DWORD WINAPI TestThreadProc( LPVOID pvArg )
 	g_TestHarness.m_bTestThreadRunning = false;
 
 	return 0;
+#endif
 }
 
 void Test_RunTest( TestFunc func, void *pvArg )
 {
+#ifdef _LINUX
+	// Test harness is no-op on Linux; stub to allow g++ -D_LINUX compilation and 1:1 inclusion in tier0.so
+	UNREFERENCED_PARAMETER( func );
+	UNREFERENCED_PARAMETER( pvArg );
+	return;
+#else
 	// One-time setup: a second Test_RunTest() used to re-init the critical
 	// section while the driver thread might be inside it and to overwrite (and
 	// leak) both event handles.
@@ -206,14 +243,19 @@ void Test_RunTest( TestFunc func, void *pvArg )
 	{
 		SetEvent( g_TestThreadInfo.hRunMainThread );
 	}
+#endif
 }
 
 void Test_RunFrame()
 {
+#ifdef _LINUX
+	return;
+#else
 	AssertMsgOnce( GetCurrentThreadId() == ( DWORD )( uintptr_t )g_TestHarness.m_ulMainThreadID, "Main thread only call!" );
 
 	SetEvent( g_TestThreadInfo.hRunTestThread );
 	WaitForSingleObject( g_TestThreadInfo.hRunMainThread, INFINITE );
+#endif
 }
 
 bool Test_IsActive()			{ return g_TestHarness.m_bTestActive; }
@@ -227,6 +269,9 @@ bool Test_HasFinished()
 
 void Test_TerminateThread()
 {
+#ifdef _LINUX
+	return;
+#else
 	if ( g_TestHarness.m_bTestActive )
 	{
 		AssertMsgOnce( g_TestHarness.m_bTestThreadRunning || g_TestHarness.m_hThreadTestDriver != NULL, "No test thread to terminate!" );
@@ -248,6 +293,7 @@ void Test_TerminateThread()
 		g_TestHarness.m_bTestActive	= false;
 		g_TestHarness.m_bTestFailed	= false;
 	}
+#endif
 }
 
 void TestThread_Yield()
