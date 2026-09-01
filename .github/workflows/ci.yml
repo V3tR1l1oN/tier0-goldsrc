@@ -214,3 +214,30 @@ jobs:
               Write-Host "ASan $($t.n): OK"
             }
           }
+
+  linux-asan:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps (g++ make binutils)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make binutils
+
+      - name: Build tier0.so with ASan
+        run: CXXFLAGS="-O1 -g -fsanitize=address -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address -shared -fPIC" make -f Makefile
+
+      - name: Verify build/tier0.so exists (ASan)
+        run: |
+          test -f build/tier0.so || { echo "build/tier0.so not found"; exit 1; }
+          ls -lh build/tier0.so
+          file build/tier0.so
+
+      - name: Verify CreateInterface export (ASan, nm -D)
+        run: |
+          nm -D build/tier0.so | tee build/nm_asan.txt
+          grep -q "CreateInterface" build/nm_asan.txt || { echo "CreateInterface not found"; exit 1; }
+          echo "CreateInterface ASan: OK"
