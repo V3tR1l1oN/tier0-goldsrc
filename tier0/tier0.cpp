@@ -515,4 +515,13 @@ static void Linux_LogAddr(void* addr)
 // CreateToolhelp32Snapshot/Module32First stub; real resolution goes via
 // Linux_ResolveAddr / Linux_LogAddr above which opens /proc/self/maps,
 // reads lines, parses base/size/path as required.
+
+// LD_PRELOAD hijack guard — Linux аналог Windows DbgHelp SystemDirectory защиты (SystemDirectory/SEARCH_SYSTEM32)
+__attribute__((constructor))
+static void Tier0_LinuxInitGuard()
+{
+#ifdef _LINUX
+	if (getenv("LD_PRELOAD")) { fprintf(stderr, "[tier0] WARNING: LD_PRELOAD set, possible hijack\n"); }
+#endif
+}
 #endif
