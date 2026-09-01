@@ -22,9 +22,6 @@
 #pragma warning( disable: 4091 )
 #include "minidump.h"
 #pragma warning( pop )
-#else
-#include "minidump.h"
-#endif
 
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
@@ -323,6 +320,7 @@ void WriteMiniDumpForException( unsigned int uExceptionCode, struct _EXCEPTION_P
 }
 
 #else
+#include "minidump.h" // POSIX: provides FnWMain/FnVoidPtrFn/FnMiniDump + EXCEPTION_POINTERS fwd
 PLATFORM_INTERFACE void WriteMiniDump()
 {
 }
