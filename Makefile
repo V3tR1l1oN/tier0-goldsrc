@@ -15,8 +15,8 @@ PUBDIR   = public
 OUTDIR   = build
 TARGET   = $(OUTDIR)/tier0.so
 
-# Full tier0 sources — all tier0/*.cpp (test harnesses excluded on Linux).
-SRCS     = $(filter-out $(SRCDIR)/testthread.cpp $(SRCDIR)/testthread2.cpp,$(wildcard $(SRCDIR)/*.cpp))
+# Full tier0 sources — all tier0/*.cpp (test harnesses + validator excluded on Linux).
+SRCS     = $(filter-out $(SRCDIR)/testthread.cpp $(SRCDIR)/testthread2.cpp $(SRCDIR)/validator.cpp,$(wildcard $(SRCDIR)/*.cpp))
 
 OBJS     = $(patsubst $(SRCDIR)/%.cpp,$(OUTDIR)/%.o,$(SRCS))
 
