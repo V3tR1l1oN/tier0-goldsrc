@@ -334,7 +334,7 @@ PLATFORM_INTERFACE void CatchAndWriteMiniDump( FnWMain pfn, int argc, tchar *arg
 PLATFORM_INTERFACE void CatchAndWriteMiniDumpForVoidPtrFn( FnVoidPtrFn pvFn, FnMiniDump pfnMiniDump, bool bExitQuietly )
 {
 	if( pvFn )
-		pvFn();
+		pvFn( nullptr );
 }
 
 bool BGetMiniDumpLock()
