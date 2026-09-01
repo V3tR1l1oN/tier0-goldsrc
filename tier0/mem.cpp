@@ -198,11 +198,9 @@ namespace
 			if ( add )
 			{
 #ifdef _LINUX
-				// The arena was created with a PROT_NONE anonymous reservation
-				// (line ~270); committing a sub-range grants rw access via a
-				// MAP_FIXED remap of that known, page-aligned VA range.
-				if ( mmap( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE,
-					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0 ) == MAP_FAILED )
+				// PROT_NONE reservation committed via mprotect — no new VMA,
+				// saves page tables vs MAP_FIXED remap.
+				if ( mprotect( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE ) != 0 )
 					commitOk = false;
 #else
 				if ( !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
@@ -291,8 +289,8 @@ namespace
 		}
 
 #ifdef _LINUX
-		// MEM_RESERVE on Linux: a PROT_NONE anonymous reservation. Pages stay
-		// inaccessible until the allocator commits sub-ranges (MAP_FIXED remaps).
+		// MEM_RESERVE on Linux: PROT_NONE anonymous reservation (mmap).
+		// Commit via mprotect(PROT_READ|WRITE) — no extra VMA/page tables.
 		void *mm = mmap( NULL, (size_t)reserveMB << 20, PROT_NONE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
 		unsigned char *b = ( mm == MAP_FAILED ) ? NULL : ( unsigned char * )mm;
@@ -444,9 +442,7 @@ namespace
 		if ( p && add )
 		{
 #ifdef _LINUX
-			if ( add == 0 ||
-				mmap( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE,
-					MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0 ) == MAP_FAILED )
+			if ( add == 0 || mprotect( g_arena.base + commitBase, add, PROT_READ | PROT_WRITE ) != 0 )
 #else
 			if ( add == 0 || !VirtualAlloc( g_arena.base + commitBase, add, MEM_COMMIT, PAGE_READWRITE ) )
 #endif
