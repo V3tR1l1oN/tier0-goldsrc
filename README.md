@@ -120,6 +120,8 @@ D:\SteamLibrary\steamapps\common\Half-Life\tier0.dll
 
 ```
 ~/hlds_l/cstrike/tier0.so  # или рядом с hlds_linux
+# авто:
+./install.sh ~/hlds_l
 ```
 
 `Linux` сборка — полный `1:1` аналог `Windows` `tier0.dll` (тот же `316` экспортов, `mmap` вместо `VirtualAlloc`, `pthread` вместо `Win32` тредов) — можно кидать также, будет работать лучше/стабильнее чем оригинал (меньше фризов, ровный тик).
