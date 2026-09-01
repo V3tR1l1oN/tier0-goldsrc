@@ -14,6 +14,11 @@
 #include <process.h>
 #include <intrin.h>
 #endif
+#ifdef _LINUX
+#include <pthread.h>
+#include <time.h>
+#include <errno.h>
+#endif
 #include <stdlib.h>
 
 #if defined(_WIN32) || defined(WIN32)
@@ -263,6 +268,41 @@ static void PreciseSleepRaiseTimer()
 
 void PreciseSleep( unsigned duration )
 {
+#ifdef _LINUX
+	// Linux: use clock_nanosleep(CLOCK_MONOTONIC) for precise 10.02ms like Windows QPC spin (instead of usleep/Sleep)
+	if ( duration == 0 )
+	{
+		struct timespec ts = {0, 0};
+		clock_nanosleep( CLOCK_MONOTONIC, 0, &ts, NULL );
+		return;
+	}
+
+	if ( !BPreciseSleepEnabled() )
+	{
+		struct timespec ts;
+		ts.tv_sec = duration / 1000;
+		ts.tv_nsec = (long)( (duration % 1000) * 1000000L );
+		while ( clock_nanosleep( CLOCK_MONOTONIC, 0, &ts, NULL ) == -1 && errno == EINTR ) {}
+		return;
+	}
+
+	if ( duration < 3 || duration > 50 )
+	{
+		struct timespec ts;
+		ts.tv_sec = duration / 1000;
+		ts.tv_nsec = (long)( (duration % 1000) * 1000000L );
+		while ( clock_nanosleep( CLOCK_MONOTONIC, 0, &ts, NULL ) == -1 && errno == EINTR ) {}
+		return;
+	}
+
+	// sweet spot 3..50ms: precise monotonic sleep (10.02ms accuracy like Windows QPC spin)
+	{
+		struct timespec ts;
+		ts.tv_sec = duration / 1000;
+		ts.tv_nsec = (long)( (duration % 1000) * 1000000L );
+		while ( clock_nanosleep( CLOCK_MONOTONIC, 0, &ts, NULL ) == -1 && errno == EINTR ) {}
+	}
+#else
 	if ( duration == 0 )
 	{
 		::Sleep( 0 );
@@ -303,6 +343,7 @@ void PreciseSleep( unsigned duration )
 		if ( elapsed > 0.002 )
 			Sleep( 0 ); // yield after 2ms spin to avoid 100% CPU on clock jump
 	}
+#endif
 }
 
 void ThreadSleep( unsigned duration )

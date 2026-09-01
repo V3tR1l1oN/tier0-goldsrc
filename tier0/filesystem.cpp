@@ -2,8 +2,8 @@
 // Win32 implementation using CreateFile/ReadFile/FindFirstFile
 // GetReadBuffer: true zero-copy via CreateFileMapping/MapViewOfFile (mmap).
 // Fallback path uses SBArena_AllocForFileSystem (VirtualAlloc arena) instead of malloc.
-#ifdef _LINUX
 #include "../public/tier1/interface.h"
+#ifdef _LINUX
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -138,6 +138,7 @@ struct FindHandleInternal
 	bool valid = false;
 	std::string wildcard;
 	std::string baseDir;
+	std::string lowerPattern; // cached lowercased pattern for fnmatch_ci (avoid tolower per readdir)
 	char cFileName[MAX_PATH];
 	DWORD dwFileAttributes = 0;
 #else
@@ -1004,10 +1005,16 @@ public:
 		}
 		if (!pDir) { *pHandle = -1; return nullptr; }
 
+		// cache lowercased pattern once (avoid per-readdir tolower of pattern)
+		std::string lowerPattern = pattern;
+		for ( size_t i = 0; i < lowerPattern.size(); ++i )
+			lowerPattern[i] = (char)tolower( (unsigned char)lowerPattern[i] );
+
 		FindHandleInternal *fhi = new FindHandleInternal();
 		fhi->pDir = pDir;
 		fhi->wildcard = foundWildcard;
 		fhi->baseDir = dirPath;
+		fhi->lowerPattern = lowerPattern;
 		fhi->valid = false;
 
 		// read first entry matching pattern
@@ -1017,8 +1024,14 @@ public:
 			// skip "." and ".." unless pattern starts with dot
 			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
 				continue;
-			if (fnmatch_ci(pattern, entry->d_name) != 0)
-				continue;
+			// case-insensitive match using cached lowerPattern (only lowerName per entry)
+			{
+				std::string lowerName = entry->d_name;
+				for ( size_t i = 0; i < lowerName.size(); ++i )
+					lowerName[i] = (char)tolower( (unsigned char)lowerName[i] );
+				if ( fnmatch( lowerPattern.c_str(), lowerName.c_str(), 0 ) != 0 )
+					continue;
+			}
 			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
 			fhi->cFileName[MAX_PATH - 1] = '\0';
 			// stat to get attributes
@@ -1082,17 +1095,31 @@ public:
 		FindHandleInternal *fhi = m_FindHandles[handle];
 		if (!fhi->valid) return nullptr;
 #ifdef _LINUX
-		// extract pattern from wildcard
+		// extract pattern from wildcard — reuse cached lowerPattern to avoid per-iteration tolower of pattern
 		std::string path = fhi->wildcard;
 		size_t sepPos = path.find_last_of("/\\");
 		std::string pattern = (sepPos != std::string::npos) ? path.substr(sepPos + 1) : path;
+		// ensure lowerPattern is cached (first FindFirst already filled, but handle legacy handles)
+		if ( fhi->lowerPattern.empty() && !pattern.empty() )
+		{
+			fhi->lowerPattern = pattern;
+			for ( size_t i = 0; i < fhi->lowerPattern.size(); ++i )
+				fhi->lowerPattern[i] = (char)tolower( (unsigned char)fhi->lowerPattern[i] );
+		}
+		const std::string &lowerPattern = fhi->lowerPattern;
 		struct dirent *entry;
 		while ((entry = ::readdir(fhi->pDir)) != nullptr)
 		{
 			if (entry->d_name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
 				continue;
-			if (fnmatch_ci(pattern, entry->d_name) != 0)
-				continue;
+			// use cached lowerPattern (only lowerName per entry, not pattern)
+			{
+				std::string lowerName = entry->d_name;
+				for ( size_t i = 0; i < lowerName.size(); ++i )
+					lowerName[i] = (char)tolower( (unsigned char)lowerName[i] );
+				if ( fnmatch( lowerPattern.c_str(), lowerName.c_str(), 0 ) != 0 )
+					continue;
+			}
 			strncpy(fhi->cFileName, entry->d_name, MAX_PATH - 1);
 			fhi->cFileName[MAX_PATH - 1] = '\0';
 			// stat to get attributes

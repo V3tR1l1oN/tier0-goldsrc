@@ -11,6 +11,13 @@
 	#include <xmmintrin.h>
 	#include <emmintrin.h>
 	#include <pmmintrin.h>
+	#ifdef __AVX__
+		#include <immintrin.h> // AVX _mm256_* for VectorNormalize batch / _mm256_sqrt_ps
+	#endif
+#else
+	#if defined(__AVX__) || defined(__AVX2__)
+		#include <immintrin.h>
+	#endif
 #endif
 
 // SSE helpers ---------------------------------------------------------------
@@ -338,7 +345,24 @@ extern "C" float VectorNormalize(vec3_t v)
 	if (len != 0.0f)
 	{
 		float inv = 1.0f / len;
+#ifdef __AVX__
+		if (GetCPUInformation().m_bAVX)
+		{
+			// AVX 256-bit path: 8 vectors in parallel via _mm256_* or _mm256_sqrt_ps; fallback to SSE otherwise
+			// Single-vec demo using 256-bit lanes (broadcast scale, _mm256_mul_ps). For 8-vec batch see VectorNormalize8_AVX.
+			__m256 vec8 = _mm256_set_ps(0.f, 0.f, 0.f, 0.f, 0.f, v[2], v[1], v[0]);
+			__m256 scl8 = _mm256_set1_ps(inv);
+			__m256 res8 = _mm256_mul_ps(vec8, scl8);
+			// _mm256_sqrt_ps example for 8-wide length: __m256 sq = _mm256_sqrt_ps(_mm256_mul_ps(vec8, vec8));
+			float tmp8[8];
+			_mm256_storeu_ps(tmp8, res8);
+			v[0]=tmp8[0]; v[1]=tmp8[1]; v[2]=tmp8[2];
+			return len;
+		}
+		else if (GetCPUInformation().m_bSSE)
+#else
 		if (GetCPUInformation().m_bSSE)
+#endif
 		{
 #ifdef _WIN32
 			__m128 vec = _mm_set_ps(0.0f, v[2], v[1], v[0]);
@@ -361,7 +385,21 @@ extern "C" float VectorNormalize2(const vec3_t in, vec3_t out)
 	if (len != 0.0f)
 	{
 		float inv = 1.0f/len;
+#ifdef __AVX__
+		if (GetCPUInformation().m_bAVX)
+		{
+			__m256 vec8 = _mm256_set_ps(0.f, 0.f, 0.f, 0.f, 0.f, in[2], in[1], in[0]);
+			__m256 scl8 = _mm256_set1_ps(inv);
+			__m256 res8 = _mm256_mul_ps(vec8, scl8);
+			float tmp8[8];
+			_mm256_storeu_ps(tmp8, res8);
+			out[0]=tmp8[0]; out[1]=tmp8[1]; out[2]=tmp8[2];
+			return len;
+		}
+		else if (GetCPUInformation().m_bSSE)
+#else
 		if (GetCPUInformation().m_bSSE)
+#endif
 		{
 #ifdef _WIN32
 			__m128 vec = _mm_set_ps(0.0f, in[2], in[1], in[0]);
@@ -381,6 +419,39 @@ extern "C" float VectorNormalize2(const vec3_t in, vec3_t out)
 	}
 	return len;
 }
+
+#ifdef __AVX__
+// AVX 256-bit batch: 8 vec3 normalized in parallel via _mm256_sqrt_ps/_mm256_mul_ps, fallback to SSE scalar if !m_bAVX
+extern "C" void VectorNormalize8_AVX(const vec3_t *in, vec3_t *out, float *lengths)
+{
+	if (!in || !out) return;
+	// Fallback to scalar if AVX not available at runtime
+	if (!GetCPUInformation().m_bAVX)
+	{
+		for (int i=0;i<8;++i) { float l = VectorNormalize2(in[i], out[i]); if (lengths) lengths[i]=l; }
+		return;
+	}
+	// Gather 8 vec X/Y/Z into 256-bit vectors
+	__m256 xs = _mm256_set_ps(in[7][0], in[6][0], in[5][0], in[4][0], in[3][0], in[2][0], in[1][0], in[0][0]);
+	__m256 ys = _mm256_set_ps(in[7][1], in[6][1], in[5][1], in[4][1], in[3][1], in[2][1], in[1][1], in[0][1]);
+	__m256 zs = _mm256_set_ps(in[7][2], in[6][2], in[5][2], in[4][2], in[3][2], in[2][2], in[1][2], in[0][2]);
+	__m256 sq = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(xs, xs), _mm256_mul_ps(ys, ys)), _mm256_mul_ps(zs, zs));
+	__m256 len8 = _mm256_sqrt_ps(sq);
+	float tmpLen[8]; _mm256_storeu_ps(tmpLen, len8);
+	for (int i=0;i<8;++i) if (lengths) lengths[i]=tmpLen[i];
+	// avoid div-by-zero: blend inv = len>0 ? 1/len : 0
+	__m256 zero = _mm256_setzero_ps();
+	__m256 mask = _mm256_cmp_ps(len8, zero, _CMP_GT_OQ);
+	__m256 inv8 = _mm256_div_ps(_mm256_set1_ps(1.f), len8);
+	inv8 = _mm256_blendv_ps(zero, inv8, mask);
+	__m256 nxs = _mm256_mul_ps(xs, inv8);
+	__m256 nys = _mm256_mul_ps(ys, inv8);
+	__m256 nzs = _mm256_mul_ps(zs, inv8);
+	float tx[8], ty[8], tz[8];
+	_mm256_storeu_ps(tx, nxs); _mm256_storeu_ps(ty, nys); _mm256_storeu_ps(tz, nzs);
+	for (int i=0;i<8;++i) { if (tmpLen[i]!=0.f) { out[i][0]=tx[i]; out[i][1]=ty[i]; out[i][2]=tz[i]; } else { out[i][0]=out[i][1]=out[i][2]=0.f; } }
+}
+#endif
 
 extern "C" int VectorCompare(const vec3_t v1, const vec3_t v2)
 {

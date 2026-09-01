@@ -17,6 +17,9 @@
 	#include <pmmintrin.h>   // SSE3  _mm_hadd_ps
 	#include <tmmintrin.h>
 	#include <intrin.h>
+	#ifdef __AVX__
+		#include <immintrin.h> // __m256 _mm256_* AVX (VectorNormalize batch)
+	#endif
 #else
 	#if defined(__SSE__) || defined(__AVX__)
 		#include <xmmintrin.h>
@@ -80,8 +83,12 @@ PLATFORM_INTERFACE void Vector4Scale(const vec4_t in, vec_t scale, vec4_t out);
 PLATFORM_INTERFACE float VectorLength(const vec3_t v);
 PLATFORM_INTERFACE float VectorLengthSqr(const vec3_t v);
 PLATFORM_INTERFACE float VectorLength4(const vec4_t v);
-PLATFORM_INTERFACE float VectorNormalize(vec3_t v); // in-place, returns length
+PLATFORM_INTERFACE float VectorNormalize(vec3_t v); // in-place, returns length — SSE path, AVX _mm256_* when m_bAVX
 PLATFORM_INTERFACE float VectorNormalize2(const vec3_t in, vec3_t out);
+// AVX 256-bit batch: 8 vec3 in parallel via _mm256_sqrt_ps/_mm256_mul_ps, fallback to SSE
+#ifdef __AVX__
+PLATFORM_INTERFACE void VectorNormalize8_AVX(const vec3_t *in, vec3_t *out, float *lengths);
+#endif
 
 PLATFORM_INTERFACE int VectorCompare(const vec3_t v1, const vec3_t v2);
 PLATFORM_INTERFACE void VectorLerp(const vec3_t a, const vec3_t b, float t, vec3_t out);
