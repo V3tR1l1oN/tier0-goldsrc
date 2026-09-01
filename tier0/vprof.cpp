@@ -11,12 +11,23 @@
 #include "fasttimer.h"
 #include "validator.h"
 #include <malloc.h>
+#include <cstring>
+#include <cstdio>
 
 #ifdef WIN32
 #ifndef ARRAYSIZE
 #define ARRAYSIZE( p ) ( sizeof( p ) / sizeof( (p)[0] ) )
 #endif
 #include "winlite.h"
+#endif
+
+#ifdef _LINUX
+#ifndef _T
+#define _T(x) x
+#endif
+#ifndef _sntprintf
+#define _sntprintf snprintf
+#endif
 #endif
 
 int CVProfNode::s_iCurrentUniqueNodeID = 0;
@@ -589,7 +600,11 @@ void CVProfile::EnterScope( const tchar *pszName, int detailLevel, const tchar *
 	if ( m_Enabled > 0 )
 	{
 		if ( !pszName || !pszName[ 0 ] )
+#ifdef _LINUX
+			pszName = "unknown";
+#else
 			pszName = _T( "unknown" );
+#endif
 
 		// Node mutation is synchronized when thread safety has been enabled.
 		CRITICAL_SECTION *pCS = nullptr;
@@ -846,7 +861,11 @@ void CVProfile::EnableVTuneGroup( const char *pszGroupName )
 	m_bVTuneGroupEnabled	= true;
 	m_VTuneGroupID			= BudgetGroupNameToBudgetGroupID( pszGroupName, BUDGETFLAG_HIDDEN );
 
+#ifdef _LINUX
+	strncpy( m_VTuneGroupName, pszGroupName, sizeof( m_VTuneGroupName ) - 1 );
+#else
 	strncpy_s( m_VTuneGroupName, pszGroupName, sizeof( m_VTuneGroupName ) - 1 );
+#endif
 	m_VTuneGroupName[ sizeof( m_VTuneGroupName ) - 1 ] = '\0';
 }
 
