@@ -4,7 +4,8 @@
 # On Linux only a subset compiles cleanly without full Win32 port; platform.cpp is the primary cross-platform unit.
 
 CXX      ?= g++
-CXXFLAGS ?= -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-unknown-pragmas
+CXXFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unknown-pragmas
+CXXFLAGS += -fPIC
 CPPFLAGS ?= -D_LINUX -DPOSIX -DLINUX -D_POSIX -DTIER0_DLL_EXPORT -DNDEBUG -D_CRT_SECURE_NO_WARNINGS
 INCLUDES  = -Ipublic -Ipublic/tier0 -Itier0
 LDFLAGS  += -shared -fPIC
