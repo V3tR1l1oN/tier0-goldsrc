@@ -359,6 +359,12 @@ int64 ThreadInterlockedExchangeAdd64( int64 volatile *pDest, int64 v )	{ return 
 
 int ThreadIsProcessActive( int procID )
 {
+#ifdef _LINUX
+	// No OpenProcess / PROCESS_QUERY_INFORMATION on POSIX — stub to 0
+	// (matches platform.h GetExitCodeProcess/OpenProcess stubs).
+	UNREFERENCED_PARAMETER( procID );
+	return 0;
+#else
 	// Original (10009AE0): OpenProcess(PROCESS_QUERY_INFORMATION) + GetExitCodeProcess
 	// == STILL_ACTIVE (0x103). Invalid/limited handles -> FALSE.
 	HANDLE hProc = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, ( DWORD )procID );
@@ -377,6 +383,7 @@ int ThreadIsProcessActive( int procID )
 	}
 
 	return 0;
+#endif
 }
 
 int WaitForMultipleEvents( int nEvents, const void **pHandles, bool bWaitAll, unsigned timeout )
@@ -426,6 +433,7 @@ unsigned __stdcall SimpleThreadThreadProc( void *pvParam )
 {
 	SimpleThreadInit_t *pData = ( SimpleThreadInit_t * )pvParam;
 	unsigned retVal = 0;
+#ifndef _LINUX
 	__try
 	{
 		retVal = pData->pfnUserFunc( pData->pvParam );
@@ -434,6 +442,11 @@ unsigned __stdcall SimpleThreadThreadProc( void *pvParam )
 	{
 		delete pData;
 	}
+#else
+	// SEH (__try/__finally/__except) is MSVC-only. On POSIX just call directly.
+	retVal = pData->pfnUserFunc( pData->pvParam );
+	delete pData;
+#endif
 	return retVal;
 }
 
@@ -466,7 +479,11 @@ void DeclareCurrentThreadIsMainThread()		{ g_ThreadMainThreadID = GetCurrentThre
 // Thread-id used by Plat_GetCurrentThreadID is kept per-thread, exactly like the
 // original shipping tier0.dll which stores it in a TLS slot (+4) at Plat_GetCurrentThreadID
 // (100072B0) / Plat_RegisterPrimaryThread (100072D0) / Plat_RegisterThread (10007300).
+#ifdef _LINUX
+static thread_local unsigned s_RegThreadID = 0;
+#else
 static __declspec( thread ) unsigned s_RegThreadID = 0;
+#endif
 
 // DATA export defined in exports_fillins.cpp.
 extern "C" unsigned long Plat_PrimaryThreadID;

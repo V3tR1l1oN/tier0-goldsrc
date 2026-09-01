@@ -326,6 +326,8 @@
 	#endif
 	#if defined(_WIN32) && defined(_MSC_VER)
 	inline void __debugbreak() { __debugbreak(); }
+	#elif defined(_TIER0_MINGW_LINUX)
+	// MinGW already provides __debugbreak() via _mingw.h / intrin.h
 	#else
 	#include <signal.h>
 	inline void __debugbreak() { raise( SIGTRAP ); }
@@ -424,6 +426,13 @@
 	#include <windows.h>
 #endif
 
+// MinGW headers require _WIN32 even in Linux-shim mode; restore it for
+// standard headers so MinGW's corecrt.h doesn't #error "Only Win32 target is supported"
+#if defined(_TIER0_MINGW_LINUX) && !defined(_WIN32)
+#define _TIER0_MINGW_LINUX_RESTORED_WIN32 1
+#define _WIN32 1
+#define WIN32 1
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -432,6 +441,15 @@
 #include <cstdarg>
 #include <cfloat>
 #include <cmath>
+#if defined(_TIER0_MINGW_LINUX_RESTORED_WIN32)
+#undef _WIN32
+#undef WIN32
+#undef _TIER0_MINGW_LINUX_RESTORED_WIN32
+// Re-assert _LINUX shim dominance after standard headers
+#ifndef _LINUX
+#define _LINUX 1
+#endif
+#endif
 
 #ifdef _WIN32
 #include <tchar.h>
