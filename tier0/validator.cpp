@@ -11,6 +11,17 @@
 #include "threadtools.h"
 
 #include <malloc.h>
+#include <cstring>
+#include <cstdio>
+
+#ifdef _LINUX
+#ifndef _T
+#define _T(x) x
+#endif
+#ifndef _sntprintf
+#define _sntprintf snprintf
+#endif
+#endif
 
 //=============================================================================
 // CValObject
@@ -23,7 +34,11 @@ CValObject::~CValObject()
 void CValObject::Init( tchar *pchType, void *pvObj, tchar *pchName,
 					   CValObject *pValObjectParent, CValObject *pValObjectPrev )
 {
+#ifdef _LINUX
+	strncpy( m_pchType, pchType ? pchType : "", sizeof( m_pchType ) - 1 );
+#else
 	strncpy_s( m_pchType, pchType ? pchType : _T( "" ), sizeof( m_pchType ) - 1 );
+#endif
 	m_pchType[ sizeof( m_pchType ) - 1 ] = '\0';
 
 	m_nTypeLength			= 0;
